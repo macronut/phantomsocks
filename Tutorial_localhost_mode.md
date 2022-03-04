@@ -2,11 +2,7 @@
 To use phantomsocks on the **hosted machine itself**.
 ## Set up local dns
 
-`sudo systemd-resolve --interface=Network_Interface --set-dns=127.0.0.1` 
-
-(Please replace **Network_Interface** with the name of a particular network interface)
-
-You can also use other ways to manipulate the system dns into 127.0.0.1.
+Manipulate the system dns into 127.0.0.1 using the way you find convenience.
 
 ## Set up NAT rule
 
