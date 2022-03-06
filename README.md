@@ -44,6 +44,8 @@ iptables -t nat -A OUTPUT -d 6.0.0.0/8 -p tcp -j REDIRECT --to-port 6
 Windows(windivert):
 ./phantomsocks -redir 0.0.0.0:6 -proxy redirect://0.0.0.0:6
 ```
+#### [Localhost Redirect Mode](./Tutorial_localhost_mode.md)
+
 
 ## Configure
 ```
