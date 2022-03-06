@@ -2,7 +2,7 @@
 To use phantomsocks on the **hosted machine itself**.
 ## Set up local dns
 
-Manipulate the system dns into 127.0.0.1 using the way you find convenience.
+Set the system dns into 127.0.0.1 using the way you find convenience.
 
 ## Set up NAT rule
 
