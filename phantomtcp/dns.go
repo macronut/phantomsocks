@@ -914,7 +914,8 @@ func NSRequest(request []byte, cache bool) []byte {
 				if qtype == 28 {
 					return BuildResponse(request, qtype, 0, nil)
 				}
-				return BuildLie(request, qtype, answer.Index)
+				// return BuildLie(request, qtype, answer.Index)
+				return BuildResponse(request, qtype, 3600, answer.Addresses)
 			} else {
 				return BuildResponse(request, qtype, uint32(ttl), answer.Addresses)
 			}
@@ -934,7 +935,8 @@ func NSRequest(request []byte, cache bool) []byte {
 					if qtype == 28 {
 						return BuildResponse(request, qtype, 0, nil)
 					}
-					return BuildLie(request, qtype, answer.Index)
+					// return BuildLie(request, qtype, answer.Index)
+					return BuildResponse(request, qtype, 3600, answer.Addresses)
 				} else {
 					return BuildResponse(request, qtype, 3600, answer.Addresses)
 				}

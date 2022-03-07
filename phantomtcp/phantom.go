@@ -24,6 +24,7 @@ type PhantomServer struct {
 }
 
 var DomainMap map[string]*PhantomServer
+var IpMap map[*net.IPNet]*PhantomServer
 
 var SubdomainDepth = 2
 var LogLevel = 0
@@ -45,19 +46,19 @@ const (
 	OPT_KEEPALIVE = 0x1 << 10
 	OPT_SYNX2     = 0x1 << 11
 
-	OPT_HTTP  = 0x1 << 16
-	OPT_HTTPS = 0x1 << 17
-	OPT_MOVE  = 0x1 << 18
-	OPT_STRIP = 0x1 << 19
+	OPT_HTTP     = 0x1 << 16
+	OPT_HTTPS    = 0x1 << 17
+	OPT_MOVE     = 0x1 << 18
+	OPT_STRIP    = 0x1 << 19
 	OPT_FRONTING = 0x1 << 20
-	OPT_IPV4  = 0x1 << 21
-	OPT_IPV6  = 0x1 << 22
-	OPT_MODE2 = 0x1 << 23
-	OPT_DF    = 0x1 << 24
-	OPT_SAT   = 0x1 << 25
-	OPT_RAND  = 0x1 << 26
-	OPT_SSEG  = 0x1 << 27
-	OPT_1SEG  = 0x1 << 28
+	OPT_IPV4     = 0x1 << 21
+	OPT_IPV6     = 0x1 << 22
+	OPT_MODE2    = 0x1 << 23
+	OPT_DF       = 0x1 << 24
+	OPT_SAT      = 0x1 << 25
+	OPT_RAND     = 0x1 << 26
+	OPT_SSEG     = 0x1 << 27
+	OPT_1SEG     = 0x1 << 28
 
 	OPT_PROXY = 0x1 << 31
 )
@@ -81,19 +82,19 @@ var MethodMap = map[string]uint32{
 	"keep-alive": OPT_KEEPALIVE,
 	"synx2":      OPT_SYNX2,
 
-	"http":  OPT_HTTP,
-	"https": OPT_HTTPS,
-	"move":  OPT_MOVE,
-	"strip": OPT_STRIP,
+	"http":     OPT_HTTP,
+	"https":    OPT_HTTPS,
+	"move":     OPT_MOVE,
+	"strip":    OPT_STRIP,
 	"fronting": OPT_FRONTING,
-	"ipv4":  OPT_IPV4,
-	"ipv6":  OPT_IPV6,
-	"mode2": OPT_MODE2,
-	"df":    OPT_DF,
-	"sat":   OPT_SAT,
-	"rand":  OPT_RAND,
-	"s-seg": OPT_SSEG,
-	"1-seg": OPT_1SEG,
+	"ipv4":     OPT_IPV4,
+	"ipv6":     OPT_IPV6,
+	"mode2":    OPT_MODE2,
+	"df":       OPT_DF,
+	"sat":      OPT_SAT,
+	"rand":     OPT_RAND,
+	"s-seg":    OPT_SSEG,
+	"1-seg":    OPT_1SEG,
 
 	"proxy": OPT_PROXY,
 }
@@ -124,6 +125,15 @@ func ConfigLookup(name string) (PhantomServer, bool) {
 			return *config, true
 		}
 		offset++
+	}
+
+	ip := net.ParseIP(name)
+	if ip != nil {
+		for k, v := range IpMap {
+			if k.Contains(ip) {
+				return *v, true
+			}
+		}
 	}
 
 	return PhantomServer{0, 0, 0, 0, "", ""}, false
@@ -302,6 +312,7 @@ func getMyIPv6() net.IP {
 
 func Init() {
 	DomainMap = make(map[string]*PhantomServer)
+	IpMap = make(map[*net.IPNet]*PhantomServer)
 }
 
 func LoadConfig(filename string) error {
@@ -456,6 +467,7 @@ func LoadConfig(filename string) error {
 								if ip == nil {
 									log.Println(ips[i], "bad ip")
 								}
+								DomainMap[ips[i]] = CurrentServer
 								ip4 := ip.To4()
 								if ip4 != nil {
 									RecordA.Addresses = append(RecordA.Addresses, ip4)
@@ -485,17 +497,18 @@ func LoadConfig(filename string) error {
 						}
 					}
 				} else {
-					addr, err := net.ResolveTCPAddr("tcp", keys[0])
-					if err != nil {
-						DomainMap[keys[0]] = CurrentServer
+					if strings.Index(keys[0], "/") > 0 {
+						_, ipnet, err := net.ParseCIDR(keys[0])
+						if err == nil {
+							IpMap[ipnet] = CurrentServer
+							DomainMap[ipnet.String()] = CurrentServer
+						}
 					} else {
-						if strings.Index(keys[0], "/") > 0 {
-							_, ipnet, err := net.ParseCIDR(keys[0])
-							if err == nil {
-								DomainMap[ipnet.String()] = CurrentServer
-							}
+						ip := net.ParseIP(keys[0])
+						if ip != nil {
+							DomainMap[keys[0]] = CurrentServer
 						} else {
-							DomainMap[addr.IP.String()] = CurrentServer
+							log.Println(keys[0], "bad ip")
 						}
 					}
 				}
