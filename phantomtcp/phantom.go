@@ -3,6 +3,7 @@ package phantomtcp
 import (
 	"bufio"
 	"bytes"
+	"container/list"
 	"crypto/tls"
 	"encoding/binary"
 	"fmt"
@@ -25,6 +26,7 @@ type PhantomServer struct {
 
 var DomainMap map[string]*PhantomServer
 var IpMap map[*net.IPNet]*PhantomServer
+var ipList list.List
 
 var SubdomainDepth = 2
 var LogLevel = 0
@@ -128,11 +130,11 @@ func ConfigLookup(name string) (PhantomServer, bool) {
 	}
 
 	ip := net.ParseIP(name)
-	if ip != nil {
-		for k, v := range IpMap {
-			if k.Contains(ip) {
-				return *v, true
-			}
+	for i := ipList.Back(); i != nil; i = i.Prev() {
+		ipNet := i.Value.(*net.IPNet)
+		if ipNet.Contains(ip) {
+			log.Println("11111", name, ipNet)
+			return *IpMap[ipNet], true
 		}
 	}
 
@@ -501,6 +503,7 @@ func LoadConfig(filename string) error {
 						_, ipnet, err := net.ParseCIDR(keys[0])
 						if err == nil {
 							IpMap[ipnet] = CurrentServer
+							ipList.PushBack(ipnet)
 							DomainMap[ipnet.String()] = CurrentServer
 						}
 					} else {
