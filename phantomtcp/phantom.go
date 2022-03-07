@@ -504,12 +504,7 @@ func LoadConfig(filename string) error {
 							DomainMap[ipnet.String()] = CurrentServer
 						}
 					} else {
-						ip := net.ParseIP(keys[0])
-						if ip != nil {
-							DomainMap[keys[0]] = CurrentServer
-						} else {
-							log.Println(keys[0], "bad ip")
-						}
+						DomainMap[keys[0]] = CurrentServer
 					}
 				}
 			}
