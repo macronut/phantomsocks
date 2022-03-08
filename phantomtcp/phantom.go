@@ -130,10 +130,12 @@ func ConfigLookup(name string) (PhantomServer, bool) {
 	}
 
 	ip := net.ParseIP(name)
-	for i := ipList.Back(); i != nil; i = i.Prev() {
-		ipNet := i.Value.(*net.IPNet)
-		if ipNet.Contains(ip) {
-			return *IpMap[ipNet], true
+	if ip != nil {
+		for i := ipList.Back(); i != nil; i = i.Prev() {
+			ipNet := i.Value.(*net.IPNet)
+			if ipNet.Contains(ip) {
+				return *IpMap[ipNet], true
+			}
 		}
 	}
 

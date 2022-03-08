@@ -237,5 +237,4 @@ func TCPMapping(Address string, Hosts string) error {
 			}
 		}()
 	}
-	return nil
 }

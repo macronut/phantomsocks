@@ -226,7 +226,7 @@ func (server *PhantomServer) Dial(addresses []net.IP, port int, b []byte) (net.C
 
 			conn, synpacket, err = DialConnInfo(laddr, raddr, server, tfo_payload)
 
-			logPrintln(2, ip, port, err)
+			// logPrintln(2, ip, port, err)
 			if err != nil {
 				if IsNormalError(err) {
 					continue
@@ -382,7 +382,7 @@ func (server *PhantomServer) HTTP(client net.Conn, addresses []net.IP, port int,
 
 				raddr := &net.TCPAddr{IP: ip, Port: port, Zone: ""}
 				conn, connInfo, err = DialConnInfo(laddr, raddr, server, nil)
-				logPrintln(2, ip, port, err)
+				// logPrintln(2, ip, port, err)
 				if err != nil {
 					if IsNormalError(err) {
 						continue
