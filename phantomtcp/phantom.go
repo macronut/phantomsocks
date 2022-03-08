@@ -505,7 +505,6 @@ func LoadConfig(filename string) error {
 						if err == nil {
 							IpMap[ipnet] = CurrentServer
 							ipList.PushBack(ipnet)
-							DomainMap[ipnet.String()] = CurrentServer
 						}
 					} else {
 						DomainMap[keys[0]] = CurrentServer
