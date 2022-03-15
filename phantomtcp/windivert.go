@@ -520,8 +520,8 @@ func RedirectDNS() {
 			continue
 		}
 
-		conf, ok := ConfigLookup(qname)
-		if ok {
+		conf := ConfigLookup(qname)
+		if conf != nil {
 			logPrintln(1, qname, conf)
 			var response []byte
 			if (conf.Option & OPT_MODIFY) != 0 {
