@@ -795,10 +795,7 @@ func StoreDNSCache(qname string, record *DNSRecords) {
 }
 
 func NSLookup(name string, hint uint32, server string) (int, []net.IP) {
-	var qtype uint16 = 1
-	if hint&OPT_IPV6 != 0 {
-		qtype = 28
-	}
+	isDefault := hint&OPT_IPV4 == 0 && hint&OPT_IPV6 == 0
 
 	records := LoadDNSCache(name)
 	if records == nil {
@@ -821,24 +818,20 @@ func NSLookup(name string, hint uint32, server string) (int, []net.IP) {
 			offset++
 		}
 	}
-	switch qtype {
-	case 1:
-		if records.A != nil {
-			logPrintln(3, "cached:", name, qtype, records.A.Addresses)
-			return records.Index, records.A.Addresses
-		}
-	case 28:
-		if records.AAAA != nil {
-			logPrintln(3, "cached:", name, qtype, records.AAAA.Addresses)
-			return records.Index, records.AAAA.Addresses
-		}
-	default:
-		return 0, nil
+	var address []net.IP
+	if records.A != nil && (isDefault || hint&OPT_IPV4 != 0) {
+		address = append(address, records.A.Addresses...)
+	}
+	if records.AAAA != nil && (isDefault || hint&OPT_IPV6 != 0) {
+		address = append(address, records.AAAA.Addresses...)
+	}
+	if len(address) > 0 {
+		return records.Index, address
 	}
 
-	var request []byte
-	var response []byte
-	var err error
+	var request4, request6 []byte
+	var response4, response6 []byte
+	var err, err4, err6 error
 
 	var options ServerOptions
 	u, err := url.Parse(server)
@@ -850,37 +843,6 @@ func NSLookup(name string, hint uint32, server string) (int, []net.IP) {
 		options = ParseOptions(u.RawQuery)
 	}
 
-	if u.Host != "" {
-		switch u.Scheme {
-		case "udp":
-			request = PackRequest(name, qtype, uint16(0), options.ECS)
-			response, err = UDPlookup(request, u.Host)
-		case "tcp":
-			request = PackRequest(name, qtype, uint16(0), options.ECS)
-			response, err = TCPlookup(request, u.Host, nil)
-		case "tls":
-			request = PackRequest(name, qtype, uint16(0), options.ECS)
-			response, err = TLSlookup(request, u.Host)
-		case "https":
-			request = PackRequest(name, qtype, uint16(0), options.ECS)
-			response, err = HTTPSlookup(request, u, options.Domain)
-		case "tfo":
-			request = PackRequest(name, qtype, uint16(0), options.ECS)
-			response, err = TFOlookup(request, u.Host)
-		default:
-			NoseLock.Lock()
-			records.Index = len(Nose)
-			records.Hint = uint(hint)
-			Nose = append(Nose, name)
-			NoseLock.Unlock()
-			return records.Index, nil
-		}
-	}
-	if err != nil {
-		logPrintln(1, err)
-		return 0, nil
-	}
-
 	if records.Index == 0 && hint != 0 {
 		NoseLock.Lock()
 		records.Index = len(Nose)
@@ -889,25 +851,70 @@ func NSLookup(name string, hint uint32, server string) (int, []net.IP) {
 		NoseLock.Unlock()
 	}
 
-	answer := getAnswers(response)
-	if answer == nil {
-		return records.Index, nil
-	}
+	if u.Host != "" {
+		request4 = PackRequest(name, 1, uint16(0), options.ECS)
+		request6 = PackRequest(name, 28, uint16(0), options.ECS)
 
-	if options.PD != "" {
-		for i, ip := range answer.Addresses {
-			answer.Addresses[i] = net.ParseIP(options.PD + ip.String())
+		switch u.Scheme {
+		case "udp":
+			response4, err4 = UDPlookup(request4, u.Host)
+			response6, err6 = UDPlookup(request6, u.Host)
+		case "tcp":
+			response4, err4 = TCPlookup(request4, u.Host, nil)
+			response6, err6 = TCPlookup(request6, u.Host, nil)
+		case "tls":
+			response4, err4 = TLSlookup(request4, u.Host)
+			response6, err6 = TLSlookup(request6, u.Host)
+		case "https":
+			response4, err4 = HTTPSlookup(request4, u, options.Domain)
+			response6, err6 = HTTPSlookup(request6, u, options.Domain)
+		case "tfo":
+			response4, err4 = TFOlookup(request4, u.Host)
+			response6, err6 = TFOlookup(request6, u.Host)
+		default:
+			return records.Index, nil
 		}
 	}
-	logPrintln(3, "nslookup", name, qtype, answer.Addresses)
-	switch qtype {
-	case 1:
-		records.A = answer
-	case 28:
-		records.AAAA = answer
+
+	if isDefault || hint&OPT_IPV4 != 0 {
+		if err4 != nil {
+			logPrintln(1, err4)
+			return 0, nil
+		}
+
+		answer := getAnswers(response4)
+		if answer != nil {
+			if options.PD != "" {
+				for i, ip := range answer.Addresses {
+					answer.Addresses[i] = net.ParseIP(options.PD + ip.String())
+				}
+			}
+			logPrintln(3, "NSLookup", name, 1, answer.Addresses)
+			records.A = answer
+			address = append(address, answer.Addresses...)
+		}
 	}
 
-	return records.Index, answer.Addresses
+	if isDefault || hint&OPT_IPV6 != 0 {
+		if err6 != nil {
+			logPrintln(1, err6)
+			return 0, nil
+		}
+
+		answer := getAnswers(response6)
+		if answer != nil {
+			if options.PD != "" {
+				for i, ip := range answer.Addresses {
+					answer.Addresses[i] = net.ParseIP(options.PD + ip.String())
+				}
+			}
+			logPrintln(3, "NSLookup", name, 28, answer.Addresses)
+			records.AAAA = answer
+			address = append(address, answer.Addresses...)
+		}
+	}
+
+	return records.Index, address
 }
 
 func NSRequest(request []byte, cache bool) (int, []byte) {
