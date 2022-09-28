@@ -1,0 +1,23 @@
+{
+    "$schema": "http://json-schema.org/schema",
+    "$id": "https://github.com/macronut/phantomsocks/raw/master/schema/peer.schema.json",
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+        "allowedips": {
+            "type": "string"
+        },
+        "endpoint": {
+            "type": "string"
+        },
+        "keepalive": {
+            "type": "integer"
+        },
+        "presharedkey": {
+            "type": "string"
+        },
+        "publickey": {
+            "type": "string"
+        }
+    }
+}

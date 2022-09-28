@@ -1,4 +1,5 @@
 {
+    "$schema": "schema/config.schema.json",
     "config": "default.conf",
     "vaddrprefix": 6,
     "services": [

@@ -1,0 +1,138 @@
+{
+    "$schema": "http://json-schema.org/schema",
+    "$id": "https://github.com/macronut/phantomsocks/raw/master/schema/config.schema.json",
+    "title": "Phantomsocks configuration",
+    "type": "object",
+    "properties": {
+        "$schema": {},
+        "clients": {
+            "description": "Comma-separated list of clients.",
+            "type": "string"
+        },
+        "config": {
+            "description": "Comma-separated list of configuration files.",
+            "type": "string"
+        },
+        "hosts": {
+            "description": "The path to the host file.",
+            "type": "string"
+        },
+        "interfaces": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "address": {
+                        "type": "string"
+                    },
+                    "device": {
+                        "type": "string"
+                    },
+                    "dns": {
+                        "type": "string"
+                    },
+                    "hint": {
+                        "type": "string"
+                    },
+                    "maxttl": {
+                        "type": "integer"
+                    },
+                    "mtu": {
+                        "type": "integer"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "The name of the interface."
+                    },
+                    "peers": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "peer.schema.json"
+                        },
+                        "additionalItems": false
+                    },
+                    "privatekey": {
+                        "type": "string"
+                    },
+                    "protocol": {
+                        "type": "string",
+                        "enum": [
+                            "wireguard",
+                            "direct",
+                            "redirect",
+                            "nat64",
+                            "http",
+                            "https",
+                            "socks4",
+                            "socks5",
+                            "socks"
+                        ]
+                    },
+                    "ttl": {
+                        "type": "integer"
+                    }
+                }
+            },
+            "additionalItems": false
+        },
+        "proxy": {
+            "description": "System proxy",
+            "type": "string"
+        },
+        "services": {
+            "type": "array",
+            "description": "Services",
+            "additionalItems": false,
+            "items": {
+                "type": "object",
+                "description": "Service configuration",
+                "additionalProperties": false,
+                "properties": {
+                    "address": {
+                        "type": "string"
+                    },
+                    "device": {
+                        "type": "string"
+                    },
+                    "mtu": {
+                        "type": "integer"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "The name of the service."
+                    },
+                    "peers": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "peer.schema.json"
+                        },
+                        "additionalItems": false
+                    },
+                    "privatekey": {
+                        "type": "string"
+                    },
+                    "protocol": {
+                        "type": "string",
+                        "enum": [
+                            "dns",
+                            "socks",
+                            "redirect",
+                            "tproxy",
+                            "wireguard",
+                            "pac",
+                            "sniproxy"
+                        ]
+                    }
+                }
+            }
+        },
+        "vaddrprefix": {
+            "description": "Virtual address prefix",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+        }
+    },
+    "additionalProperties": false
+}
