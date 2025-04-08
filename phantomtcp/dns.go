@@ -971,7 +971,7 @@ func PackRequest(name string, qtype uint16, id uint16, ecs string, qtype2 uint16
 		length += 2
 	} else {
 		length = 2
-		binary.BigEndian.PutUint16(Request[12:], 0xC012) // Compression pointer 0xC00C = 0xC000 | 0x0012
+		binary.BigEndian.PutUint16(Request[12:], 0xC012) // Compression pointer 0xC012 = 0xC000 | 0x0012
 		length += 12
 		binary.BigEndian.PutUint16(Request[length:], qtype)
 		length += 2
