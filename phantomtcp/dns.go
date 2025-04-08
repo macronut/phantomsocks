@@ -931,7 +931,7 @@ func ParseOptions(options string) ServerOptions {
 			case "fallback":
 				serverOpts.Fallback = net.ParseIP(key[1])
 			case "qtype2":
-				if qtype2, err := strconv.ParseUint(key[1], 10, 16); err == nil{
+				if qtype2, err := strconv.ParseUint(key[1], 10, 16); err == nil {
 					serverOpts.QType2 = uint16(qtype2)
 				}
 			}
@@ -947,9 +947,9 @@ func PackRequest(name string, qtype uint16, id uint16, ecs string, qtype2 uint16
 	binary.BigEndian.PutUint16(Request[:], id)      //ID
 	binary.BigEndian.PutUint16(Request[2:], 0x0100) //Flag
 	if qtype2 != 0 {
-		binary.BigEndian.PutUint16(Request[4:], 2) // QDCount: 2
+		binary.BigEndian.PutUint16(Request[4:], 2) //QDCount
 	} else {
-		binary.BigEndian.PutUint16(Request[4:], 1) // QDCount: 1
+		binary.BigEndian.PutUint16(Request[4:], 1) //QDCount
 	}
 	binary.BigEndian.PutUint16(Request[6:], 0)      //ANCount
 	binary.BigEndian.PutUint16(Request[8:], 0)      //NSCount
@@ -961,16 +961,24 @@ func PackRequest(name string, qtype uint16, id uint16, ecs string, qtype2 uint16
 
 	qname := PackQName(name)
 	length := len(qname)
-	copy(Request[12:], qname)
-	length += 12
-	binary.BigEndian.PutUint16(Request[length:], qtype)
-	length += 2
-	binary.BigEndian.PutUint16(Request[length:], 0x01) //QClass
-	length += 2
 
-	if qtype2 != 0 {
-		binary.BigEndian.PutUint16(Request[length:], 0xC00C) // Compression pointer 0xC00C = 0xC000 | 12
+	if qtype2 == 0 {
+		copy(Request[12:], qname)
+		length += 12
+		binary.BigEndian.PutUint16(Request[length:], qtype)
 		length += 2
+		binary.BigEndian.PutUint16(Request[length:], 0x01) //QClass
+		length += 2
+	} else {
+		length = 2
+		binary.BigEndian.PutUint16(Request[12:], 0xC012) // Compression pointer 0xC00C = 0xC000 | 0x0012
+		length += 12
+		binary.BigEndian.PutUint16(Request[length:], qtype)
+		length += 2
+		binary.BigEndian.PutUint16(Request[length:], 0x01) // QClass
+		length += 2
+		copy(Request[length:], qname)
+		length += len(qname)
 		binary.BigEndian.PutUint16(Request[length:], qtype2) // QType
 		length += 2
 		binary.BigEndian.PutUint16(Request[length:], 0x01) // QClass
