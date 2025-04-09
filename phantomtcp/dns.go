@@ -906,6 +906,7 @@ type ServerOptions struct {
 	Output    string
 	BadSubnet *net.IPNet
 	Fallback  net.IP
+	QType2    uint16
 }
 
 func ParseOptions(options string) ServerOptions {
@@ -929,6 +930,10 @@ func ParseOptions(options string) ServerOptions {
 				_, serverOpts.BadSubnet, _ = net.ParseCIDR(key[1])
 			case "fallback":
 				serverOpts.Fallback = net.ParseIP(key[1])
+			case "qtype2":
+				if qtype2, err := strconv.ParseUint(key[1], 10, 16); err == nil {
+					serverOpts.QType2 = uint16(qtype2)
+				}
 			}
 		}
 	}
@@ -936,12 +941,16 @@ func ParseOptions(options string) ServerOptions {
 	return serverOpts
 }
 
-func PackRequest(name string, qtype uint16, id uint16, ecs string) []byte {
+func PackRequest(name string, qtype uint16, id uint16, ecs string, qtype2 uint16) []byte {
 	Request := make([]byte, 512)
 
 	binary.BigEndian.PutUint16(Request[:], id)      //ID
 	binary.BigEndian.PutUint16(Request[2:], 0x0100) //Flag
-	binary.BigEndian.PutUint16(Request[4:], 1)      //QDCount
+	if qtype2 != 0 {
+		binary.BigEndian.PutUint16(Request[4:], 2) //QDCount
+	} else {
+		binary.BigEndian.PutUint16(Request[4:], 1) //QDCount
+	}
 	binary.BigEndian.PutUint16(Request[6:], 0)      //ANCount
 	binary.BigEndian.PutUint16(Request[8:], 0)      //NSCount
 	if ecs != "" {
@@ -952,12 +961,29 @@ func PackRequest(name string, qtype uint16, id uint16, ecs string) []byte {
 
 	qname := PackQName(name)
 	length := len(qname)
-	copy(Request[12:], qname)
-	length += 12
-	binary.BigEndian.PutUint16(Request[length:], qtype)
-	length += 2
-	binary.BigEndian.PutUint16(Request[length:], 0x01) //QClass
-	length += 2
+
+	if qtype2 == 0 {
+		copy(Request[12:], qname)
+		length += 12
+		binary.BigEndian.PutUint16(Request[length:], qtype)
+		length += 2
+		binary.BigEndian.PutUint16(Request[length:], 0x01) //QClass
+		length += 2
+	} else {
+		length = 2
+		binary.BigEndian.PutUint16(Request[12:], 0xC012) // Compression pointer 0xC012 = 0xC000 | 0x0012
+		length += 12
+		binary.BigEndian.PutUint16(Request[length:], qtype)
+		length += 2
+		binary.BigEndian.PutUint16(Request[length:], 0x01) // QClass
+		length += 2
+		copy(Request[length:], qname)
+		length += len(qname)
+		binary.BigEndian.PutUint16(Request[length:], qtype2) // QType
+		length += 2
+		binary.BigEndian.PutUint16(Request[length:], 0x01) // QClass
+		length += 2
+	}
 
 	if ecs != "" {
 		Request[length] = 0 //Name
@@ -1105,19 +1131,19 @@ func (pface *PhantomInterface) NSLookup(name string) (uint32, []net.IP) {
 	if u.Host != "" {
 		switch u.Scheme {
 		case "udp":
-			request = PackRequest(name, qtype, uint16(0), options.ECS)
+			request = PackRequest(name, qtype, uint16(0), options.ECS, options.QType2)
 			response, err = UDPlookup(request, u.Host)
 		case "tcp":
-			request = PackRequest(name, qtype, uint16(0), options.ECS)
+			request = PackRequest(name, qtype, uint16(0), options.ECS, options.QType2)
 			response, err = TCPlookup(request, u.Host, nil)
 		case "tls":
-			request = PackRequest(name, qtype, uint16(0), options.ECS)
+			request = PackRequest(name, qtype, uint16(0), options.ECS, options.QType2)
 			response, err = TLSlookup(request, u.Host)
 		case "https":
-			request = PackRequest(name, qtype, uint16(0), options.ECS)
+			request = PackRequest(name, qtype, uint16(0), options.ECS, options.QType2)
 			response, err = HTTPSlookup(request, u, options.Domain)
 		case "tfo":
-			request = PackRequest(name, qtype, uint16(0), options.ECS)
+			request = PackRequest(name, qtype, uint16(0), options.ECS, options.QType2)
 			response, err = TFOlookup(request, u.Host)
 		default:
 			records.Index = AddDNSLie(name, pface)
@@ -1279,7 +1305,7 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 
 		if options.ECS != "" || _qtype != uint16(qtype) {
 			id := binary.BigEndian.Uint16(request[:2])
-			_request = PackRequest(name, _qtype, id, options.ECS)
+			_request = PackRequest(name, _qtype, id, options.ECS, options.QType2)
 		}
 	}
 
