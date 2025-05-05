@@ -152,7 +152,7 @@ func (pface *PhantomInterface) Dial(conn net.Conn, host string, port int, b []by
 	device := pface.Device
 	hint := pface.Hint
 
-	if hint&HINT_FAKE == 0 {
+	if hint&HINT_MODIFY == 0 {
 		if conn == nil {
 			raddr := raddrs[mathrand.Intn(len(raddrs))]
 			var laddr *net.TCPAddr = nil
