@@ -400,10 +400,10 @@ func tcp_redirect(client net.Conn, addr *net.TCPAddr, domain string, header []by
 					return
 				} else if pface.Hint&HINT_STRIP != 0 {
 					if pface.Hint&HINT_FRONTING != 0 {
-						conn, err = pface.DialStrip(domain, "")
+						conn, err = pface.DialStrip(domain, domain)
 						domain = ""
 					} else {
-						conn, err = pface.DialStrip(domain, domain)
+						conn, err = pface.DialStrip(domain, "")
 					}
 
 					if err != nil {
