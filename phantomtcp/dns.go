@@ -46,30 +46,30 @@ var DNSCache map[string]*DNSRecords = make(map[string]*DNSRecords)
 var Nose []DNSLie = []DNSLie{{"phantom.socks", nil}}
 var NoseLock sync.Mutex
 
-func TCPlookup(request []byte, address string, server *PhantomInterface) ([]byte, error) {
+func TCPlookup(request []byte, address string) ([]byte, error) {
 	data := make([]byte, 1024)
 	binary.BigEndian.PutUint16(data[:2], uint16(len(request)))
 	copy(data[2:], request)
 
 	var conn net.Conn
-	var err error = nil
-	if server != nil {
+	raddr, err := net.ResolveTCPAddr("tcp", address)
+	if err != nil {
+		return nil, err
+	}
+	pface := DefaultProfile.GetInterfaceByIP(raddr.IP)
+
+	if pface != nil {
 		host, port := splitHostPort(address)
-		conn, _, err = server.Dial(nil, host, port, data[:len(request)+2])
-		if err != nil {
-			return nil, err
-		}
+		conn, _, err = pface.dial(host, port, data[:len(request)+2], 0, 0)
 	} else {
 		conn, err = net.DialTimeout("tcp", address, time.Second*5)
-		if err != nil {
-			return nil, err
+		if err == nil {
+			_, err = conn.Write(data[:len(request)+2])
 		}
-
-		_, err = conn.Write(data[:len(request)+2])
-		if err != nil {
-			conn.Close()
-			return nil, err
-		}
+	}
+	if err != nil {
+		conn.Close()
+		return nil, err
 	}
 	defer conn.Close()
 
@@ -95,7 +95,7 @@ func TCPlookupDNS64(request []byte, address string, offset int, prefix []byte) (
 	offset4 := offset
 
 	binary.BigEndian.PutUint16(request[offset-4:offset-2], 1)
-	response, err := TCPlookup(request, address, nil)
+	response, err := TCPlookup(request, address)
 	if err != nil {
 		return nil, err
 	}
@@ -211,7 +211,7 @@ func TLSlookup(request []byte, address string) ([]byte, error) {
 	conf := &tls.Config{
 		InsecureSkipVerify: true,
 	}
-	conn, err := tls.Dial("tcp", address, conf)
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", address, conf)
 	if err != nil {
 		return nil, err
 	}
@@ -225,6 +225,7 @@ func TLSlookup(request []byte, address string) ([]byte, error) {
 		return nil, err
 	}
 
+	conn.SetReadDeadline(time.Now().Add(time.Second * 5))
 	n, err := conn.Read(data)
 	if err != nil || n < 2 {
 		return nil, err
@@ -262,7 +263,7 @@ func HTTPSlookup(request []byte, u *url.URL, domain string) ([]byte, error) {
 		InsecureSkipVerify: true,
 		ServerName:         domain,
 	}
-	conn, err := tls.Dial("tcp", address, conf)
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", address, conf)
 	if err != nil {
 		return nil, err
 	}
@@ -279,6 +280,7 @@ func HTTPSlookup(request []byte, u *url.URL, domain string) ([]byte, error) {
 		return nil, err
 	}
 
+	conn.SetReadDeadline(time.Now().Add(time.Second * 5))
 	data := make([]byte, 2048)
 	recvlen := 0
 	headerLen := 0
@@ -817,10 +819,14 @@ func (records *DNSRecords) BuildResponse(request []byte, qtype int, minttl uint3
 				binary.BigEndian.PutUint16(response[6:], 1)
 			*/
 		case 65:
+			if records.ALPN&(HINT_HTTPS|HINT_HTTP2|HINT_HTTP3) == 0 {
+				return response[:length]
+			}
+
 			copy(response[length:], []byte{0xC0, 0x0C, 0x00, 65, 0, 1, 0, 0, 0, 16, 0, 0, 0, 1, 0})
 			dataLenOffset := length + 10
 			length += 15
-			if records.ALPN&(HINT_HTTPS|HINT_HTTP3) != 0 {
+			if records.ALPN&(HINT_HTTP2|HINT_HTTP3) != 0 {
 				copy(response[length:], []byte{0, 1, 0, 0})
 				svcLenOffset := length + 2
 				length += 4
@@ -830,16 +836,28 @@ func (records *DNSRecords) BuildResponse(request []byte, qtype int, minttl uint3
 					copy(response[length:], []byte{5, 0x68, 0x33, 0x2d, 0x32, 0x39})
 					length += 6
 				}
-				if records.ALPN&HINT_HTTPS != 0 {
+				if records.ALPN&HINT_HTTP2 != 0 {
 					copy(response[length:], []byte{2, 0x68, 0x32})
 					length += 3
 				}
 				binary.BigEndian.PutUint16(response[svcLenOffset:], uint16(length-svcLenOffset-2))
 			}
+
 			copy(response[length:], []byte{0, 4, 0, 4, VirtualAddrPrefix, 0})
 			length += 6
 			binary.BigEndian.PutUint16(response[length:], uint16(records.Index))
 			length += 2
+
+			echoLen := len(records.Ech)
+			if echoLen > 0 {
+				copy(response[length:], []byte{0, 5})
+				length += 2
+				binary.BigEndian.PutUint16(response[length:], uint16(echoLen))
+				length += 2
+				copy(response[length:], records.Ech)
+				length += echoLen
+			}
+
 			binary.BigEndian.PutUint16(response[6:], 1)
 			binary.BigEndian.PutUint16(response[dataLenOffset:], uint16(length-dataLenOffset-2))
 		}
@@ -1128,22 +1146,27 @@ func (pface *PhantomInterface) NSLookup(name string) (uint32, []net.IP) {
 		options = ParseOptions(u.RawQuery)
 	}
 
+	_name := name
+	if records.CName != "" {
+		_name = records.CName
+	}
+
 	if u.Host != "" {
 		switch u.Scheme {
 		case "udp":
-			request = PackRequest(name, qtype, uint16(0), options.ECS, options.QType2)
+			request = PackRequest(_name, qtype, uint16(0), options.ECS, options.QType2)
 			response, err = UDPlookup(request, u.Host)
 		case "tcp":
-			request = PackRequest(name, qtype, uint16(0), options.ECS, options.QType2)
-			response, err = TCPlookup(request, u.Host, nil)
+			request = PackRequest(_name, qtype, uint16(0), options.ECS, options.QType2)
+			response, err = TCPlookup(request, u.Host)
 		case "tls":
-			request = PackRequest(name, qtype, uint16(0), options.ECS, options.QType2)
+			request = PackRequest(_name, qtype, uint16(0), options.ECS, options.QType2)
 			response, err = TLSlookup(request, u.Host)
 		case "https":
-			request = PackRequest(name, qtype, uint16(0), options.ECS, options.QType2)
+			request = PackRequest(_name, qtype, uint16(0), options.ECS, options.QType2)
 			response, err = HTTPSlookup(request, u, options.Domain)
 		case "tfo":
-			request = PackRequest(name, qtype, uint16(0), options.ECS, options.QType2)
+			request = PackRequest(_name, qtype, uint16(0), options.ECS, options.QType2)
 			response, err = TFOlookup(request, u.Host)
 		default:
 			records.Index = AddDNSLie(name, pface)
@@ -1156,7 +1179,7 @@ func (pface *PhantomInterface) NSLookup(name string) (uint32, []net.IP) {
 		return 0, nil
 	}
 
-	if records.Index == 0 && hint != 0 {
+	if (hint&HINT_MODIFY != 0) && records.Index == 0 {
 		records.Index = AddDNSLie(name, pface)
 		records.ALPN = hint & HINT_DNS
 	}
@@ -1262,9 +1285,9 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 
 	if pface != nil {
 		records.ALPN = pface.Hint & HINT_DNS
-		logPrintln(2, "request:", name, pface.DNS, pface.Protocol)
+		logPrintln(2, "request:", name, qtype, pface.DNS, pface.Protocol)
 	} else {
-		logPrintln(4, "request:", name, "no answer")
+		logPrintln(4, "request:", name, qtype, "no answer")
 		return 0, records.BuildResponse(request, qtype, 3600)
 	}
 
@@ -1296,17 +1319,20 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 		}
 
 		options = ParseOptions(u.RawQuery)
-
 		if options.Type == "A" && qtype == 28 {
 			return records.Index, records.BuildResponse(request, qtype, 0)
 		} else if options.Type == "AAAA" && qtype == 1 {
 			return records.Index, records.BuildResponse(request, qtype, 0)
 		}
+	}
 
-		if options.ECS != "" || _qtype != uint16(qtype) {
-			id := binary.BigEndian.Uint16(request[:2])
-			_request = PackRequest(name, _qtype, id, options.ECS, options.QType2)
+	if options.ECS != "" || _qtype != uint16(qtype) || records.CName != "" {
+		id := binary.BigEndian.Uint16(request[:2])
+		_name := name
+		if records.CName != "" {
+			_name = records.CName
 		}
+		_request = PackRequest(_name, _qtype, id, options.ECS, options.QType2)
 	}
 
 	var response []byte
@@ -1314,7 +1340,7 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 	case "udp":
 		response, err = UDPlookup(_request, u.Host)
 	case "tcp":
-		response, err = TCPlookup(_request, u.Host, nil)
+		response, err = TCPlookup(_request, u.Host)
 	case "tls":
 		response, err = TLSlookup(_request, u.Host)
 	case "https":
@@ -1336,7 +1362,7 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 		records.GetAnswers(response, options)
 		if records.IPv4Hint == nil && options.Fallback != nil {
 			if options.Fallback.To4() != nil {
-				logPrintln(4, "request:", name, "fallback", options.Fallback)
+				logPrintln(4, "request:", name, qtype, "fallback", options.Fallback)
 				records.IPv4Hint = &RecordAddresses{0, []net.IP{options.Fallback}}
 			}
 		}
@@ -1350,7 +1376,7 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 		records.GetAnswers(response, options)
 		if records.IPv6Hint == nil && options.Fallback != nil {
 			if options.Fallback.To4() == nil {
-				logPrintln(4, "request:", name, "fallback", options.Fallback)
+				logPrintln(4, "request:", name, qtype, "fallback", options.Fallback)
 				records.IPv6Hint = &RecordAddresses{0, []net.IP{options.Fallback}}
 			}
 		}
@@ -1429,6 +1455,33 @@ func (pface *PhantomInterface) ResolveTCPAddrs(host string, port int) ([]*net.TC
 	}
 
 	return tcpAddrs, nil
+}
+
+func DNSServer(listenAddr string) error {
+	addr, err := net.ResolveUDPAddr("udp", listenAddr)
+	if err != nil {
+		return err
+	}
+	conn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	data := make([]byte, 512)
+	for {
+		n, clientAddr, err := conn.ReadFromUDP(data)
+		if err != nil {
+			continue
+		}
+
+		request := make([]byte, n)
+		copy(request, data[:n])
+		go func(clientAddr *net.UDPAddr, request []byte) {
+			_, response := NSRequest(request, true)
+			conn.WriteToUDP(response, clientAddr)
+		}(clientAddr, request)
+	}
 }
 
 func DNSTCPServer(client net.Conn) {

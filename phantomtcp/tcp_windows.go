@@ -31,7 +31,11 @@ func DialConnInfo(laddr, raddr *net.TCPAddr, server *PhantomInterface, payload [
 				err := c.Control(func(fd uintptr) {
 					f := syscall.Handle(fd)
 					if (server.Hint & (HINT_TFO | HINT_HTFO)) != 0 {
-						syscall.SetsockoptInt(f, syscall.IPPROTO_IP, syscall.IP_TTL, tfo_id|64)
+						if server.Hint&HINT_IPV6 != 0 {
+							syscall.SetsockoptInt(f, syscall.IPPROTO_IPV6, syscall.IPV6_UNICAST_HOPS, tfo_id|64)
+						} else {
+							syscall.SetsockoptInt(f, syscall.IPPROTO_IP, syscall.IP_TTL, tfo_id|64)
+						}
 					}
 					if (server.Hint & HINT_KEEPALIVE) != 0 {
 						syscall.SetsockoptInt(f, syscall.SOL_SOCKET, syscall.SO_KEEPALIVE, 1)
@@ -51,9 +55,8 @@ func DialConnInfo(laddr, raddr *net.TCPAddr, server *PhantomInterface, payload [
 	}
 
 	laddr = conn.LocalAddr().(*net.TCPAddr)
-	ip4 := raddr.IP.To4()
 	var connInfo *ConnectionInfo = nil
-	if ip4 != nil {
+	if raddr.IP.To4() != nil {
 		select {
 		case connInfo = <-ConnInfo4[laddr.Port]:
 			DelConn(raddr.String())
@@ -121,4 +124,7 @@ func GetOriginalDST(conn *net.TCPConn) (*net.TCPAddr, error) {
 
 func SendWithOption(conn net.Conn, payload []byte, tos, ttl int) error {
 	return nil
+}
+
+func TProxyTCP(address string) {
 }

@@ -3,6 +3,10 @@
 
 package phantomtcp
 
+import (
+	"net"
+)
+
 var HintMap = map[string]uint32{
 	"none":  HINT_NONE,
 	"https": HINT_HTTPS,
@@ -20,8 +24,7 @@ var HintMap = map[string]uint32{
 	"no-tcp": HINT_NOTCP,
 	"delay":  HINT_DELAY,
 
-	"s-seg":    HINT_SSEG,
-	"1-seg":    HINT_1SEG,
+	"tcp-frag": HINT_TCPFRAG,
 	"tls-frag": HINT_TLSFRAG,
 }
 
@@ -40,4 +43,8 @@ func Redirect(dst string, to_port int, forward bool) {
 }
 
 func RedirectDNS() {
+}
+
+func SendUDPPacket(laddr *net.UDPAddr, raddr *net.UDPAddr, payload []byte, ttl uint8) error {
+	return nil
 }

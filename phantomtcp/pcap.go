@@ -44,8 +44,7 @@ var HintMap = map[string]uint32{
 	"df":         HINT_DF,
 	"sat":        HINT_SAT,
 	"rand":       HINT_RAND,
-	"s-seg":      HINT_SSEG,
-	"1-seg":      HINT_1SEG,
+	"tcp-frag":   HINT_TCPFRAG,
 	"tls-frag":   HINT_TLSFRAG,
 	"half-tfo":   HINT_HTFO,
 	"keep-alive": HINT_KEEPALIVE,
@@ -129,7 +128,7 @@ func connectionMonitor(device string) {
 				result, ok := ConnSyn.Load(synAddr)
 				if ok {
 					info := result.(SynInfo)
-					hint = info.Option
+					hint = info.Hint
 				}
 			}
 
@@ -225,7 +224,7 @@ func connectionMonitor(device string) {
 				result, ok := ConnSyn.Load(synAddr)
 				if ok {
 					info := result.(SynInfo)
-					hint = info.Option
+					hint = info.Hint
 				}
 			}
 			if hint != 0 {
@@ -321,4 +320,8 @@ func ConnectionMonitor(devices []string) bool {
 	}
 
 	return true
+}
+
+func SendUDPPacket(laddr *net.UDPAddr, raddr *net.UDPAddr, payload []byte, ttl uint8) error {
+	return nil
 }

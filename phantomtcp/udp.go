@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/rand"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -97,7 +98,7 @@ func (pface *PhantomInterface) DialUDPProxy(host string, port int) (net.Conn, ne
 	case NAT64:
 		var laddr *net.UDPAddr = nil
 		if pface.Device != "" {
-			_laddr, err := GetLocalAddr(pface.Device, raddr.IP.To4() == nil)
+			_laddr, err := GetLocalTCPAddr(pface.Device, raddr.IP.To4() == nil)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -110,7 +111,7 @@ func (pface *PhantomInterface) DialUDPProxy(host string, port int) (net.Conn, ne
 		var synpacket *ConnectionInfo
 		var hint uint32 = 0
 
-		laddr, err := GetLocalAddr(pface.Device, raddr.IP.To4() == nil)
+		laddr, err := GetLocalTCPAddr(pface.Device, raddr.IP.To4() == nil)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -216,5 +217,81 @@ func GetQUICVersion(data []byte) uint32 {
 		return Version
 	default:
 		return 0
+	}
+}
+
+func GetLocalUDPAddr(name string, ipv6 bool) (*net.UDPAddr, error) {
+	if name == "" {
+		return nil, nil
+	}
+
+	inf, err := net.InterfaceByName(name)
+	if err != nil {
+		return nil, err
+	}
+	addrs, _ := inf.Addrs()
+	for _, addr := range addrs {
+		localAddr, ok := addr.(*net.IPNet)
+		if ok {
+			var laddr *net.UDPAddr
+			ip4 := localAddr.IP.To4()
+			if ipv6 {
+				if ip4 != nil || localAddr.IP.IsPrivate() {
+					continue
+				}
+				ip := make([]byte, 16)
+				copy(ip[:16], localAddr.IP)
+				laddr = &net.UDPAddr{IP: ip[:], Port: 0}
+			} else {
+				if ip4 == nil {
+					continue
+				}
+				ip := make([]byte, 4)
+				copy(ip[:4], ip4)
+				laddr = &net.UDPAddr{IP: ip[:], Port: 0}
+			}
+
+			return laddr, nil
+		}
+	}
+
+	return nil, nil
+}
+
+func StartHolePunching(service ServiceConfig) {
+	network := "udp6"
+	laddr, err := net.ResolveUDPAddr(network, service.Address)
+	if err != nil {
+		logPrintln(1, err)
+		return
+	}
+	sport := laddr.Port
+	ipv6 := strings.HasSuffix(network, "6")
+	payload := make([]byte, 4)
+
+	for {
+		if service.Device != "" {
+			laddr, err = GetLocalUDPAddr(service.Device, ipv6)
+			if err == nil {
+				laddr.Port = sport
+			}
+			if err != nil {
+				logPrintln(1, err)
+				continue
+			}
+		}
+
+		for _, peer := range service.Peers {
+			raddr, err := net.ResolveUDPAddr(network, peer.Endpoint)
+			if err == nil {
+				err = SendUDPPacket(laddr, raddr, payload, 2)
+				logPrintln(3, network, laddr, raddr)
+			}
+			if err != nil {
+				logPrintln(1, err)
+			}
+		}
+
+		time.Sleep(time.Duration(25 * int(time.Second)))
 	}
 }

@@ -24,7 +24,7 @@ type ConnectionInfo struct {
 
 type SynInfo struct {
 	Number uint32
-	Option uint32
+	Hint   uint32
 }
 
 var ConnSyn sync.Map
@@ -81,12 +81,12 @@ func IsNormalError(err error) bool {
 	return false
 }
 
-func AddConn(synAddr string, option uint32) {
-	result, ok := ConnSyn.LoadOrStore(synAddr, SynInfo{1, option})
+func AddConn(synAddr string, hint uint32) {
+	result, ok := ConnSyn.LoadOrStore(synAddr, SynInfo{1, hint})
 	if ok {
 		info := result.(SynInfo)
 		info.Number++
-		info.Option = option
+		info.Hint = hint
 		ConnSyn.Store(synAddr, info)
 	}
 }
@@ -104,7 +104,7 @@ func DelConn(synAddr string) {
 	}
 }
 
-func GetLocalAddr(name string, ipv6 bool) (*net.TCPAddr, error) {
+func GetLocalTCPAddr(name string, ipv6 bool) (*net.TCPAddr, error) {
 	if name == "" {
 		return nil, nil
 	}
@@ -142,13 +142,14 @@ func GetLocalAddr(name string, ipv6 bool) (*net.TCPAddr, error) {
 	return nil, nil
 }
 
-func (pface *PhantomInterface) Dial(conn net.Conn, host string, port int, b []byte) (net.Conn, *ConnectionInfo, error) {
-	connect_err := errors.New("connection does not exist")
+func (pface *PhantomInterface) dial(host string, port int, b []byte, offset int, length int) (net.Conn, *ConnectionInfo, error) {
+	var conn net.Conn
 	raddrs, err := pface.GetRemoteAddresses(host, port)
 	if err != nil {
 		return nil, nil, err
 	}
 
+	connect_err := errors.New("connection does not exist")
 	device := pface.Device
 	hint := pface.Hint
 
@@ -157,33 +158,29 @@ func (pface *PhantomInterface) Dial(conn net.Conn, host string, port int, b []by
 			raddr := raddrs[mathrand.Intn(len(raddrs))]
 			var laddr *net.TCPAddr = nil
 			if device != "" {
-				laddr, err = GetLocalAddr(device, raddr.IP.To4() == nil)
+				laddr, err = GetLocalTCPAddr(device, raddr.IP.To4() == nil)
 				if err != nil {
 					return nil, nil, err
 				}
 			}
 
 			conn, err = net.DialTCP("tcp", laddr, raddr)
-		}
-
-		if err == nil {
-			proxyConn, err := pface.ProxyHandshake(conn, nil, host, port, b)
 			if err != nil {
-				conn.Close()
 				return nil, nil, err
 			}
-			conn = proxyConn
 		}
 
-		return conn, nil, err
+		proxyConn, err := pface.ProxyHandshake(conn, nil, host, port, b)
+		if err != nil {
+			conn.Close()
+			return nil, nil, err
+		}
+		return proxyConn, nil, err
 	} else {
-		offset := 0
-		length := 0
-
 		if b != nil {
 			if hint&HINT_TFO != 0 {
 				length = len(b)
-			} else {
+			} else if offset == 0 {
 				if b[0] == 0x16 {
 					offset, length, _ = GetSNI(b)
 				} else {
@@ -217,7 +214,7 @@ func (pface *PhantomInterface) Dial(conn net.Conn, host string, port int, b []by
 
 			var laddr *net.TCPAddr = nil
 			if device != "" {
-				laddr, err = GetLocalAddr(device, raddr.IP.To4() == nil)
+				laddr, err = GetLocalTCPAddr(device, raddr.IP.To4() == nil)
 				if err != nil {
 					return nil, nil, err
 				}
@@ -299,7 +296,7 @@ func (pface *PhantomInterface) Dial(conn net.Conn, host string, port int, b []by
 			var synpacket *ConnectionInfo
 			for i := 0; i < len(raddrs); i++ {
 				raddr := raddrs[i]
-				laddr, err := GetLocalAddr(device, raddr.IP.To4() == nil)
+				laddr, err := GetLocalTCPAddr(device, raddr.IP.To4() == nil)
 				if err != nil {
 					return nil, nil, errors.New("invalid device")
 				}
@@ -366,13 +363,12 @@ func (pface *PhantomInterface) Dial(conn net.Conn, host string, port int, b []by
 				}
 
 				SegOffset := 0
-				if hint&(HINT_SSEG|HINT_1SEG) != 0 {
-					if hint&HINT_1SEG != 0 {
-						SegOffset = 1
-					} else {
-						SegOffset = 4
+				if hint&(HINT_TCPFRAG) != 0 && cut > 4 {
+					SegOffset = 4
+					_, err = conn.Write(b[:1])
+					if err == nil {
+						_, err = conn.Write(b[1:4])
 					}
-					_, err = conn.Write(b[:SegOffset])
 					if err != nil {
 						conn.Close()
 						return nil, nil, err
@@ -413,7 +409,7 @@ func (pface *PhantomInterface) Dial(conn net.Conn, host string, port int, b []by
 	}
 }
 
-func (server *PhantomInterface) Keep(client, conn net.Conn, connInfo *ConnectionInfo) {
+func (pface *PhantomInterface) Keep(client, conn net.Conn, connInfo *ConnectionInfo) {
 	fakepayload := make([]byte, 1500)
 
 	go func() {
@@ -425,7 +421,7 @@ func (server *PhantomInterface) Keep(client, conn net.Conn, connInfo *Connection
 				return
 			}
 
-			err = ModifyAndSendPacket(connInfo, fakepayload, server.Hint, server.TTL, 2)
+			err = ModifyAndSendPacket(connInfo, fakepayload, pface.Hint, pface.TTL, 2)
 			if err != nil {
 				conn.Close()
 				return
@@ -485,27 +481,171 @@ func (pface *PhantomInterface) GetRemoteAddresses(host string, port int) ([]*net
 	}
 }
 
-func relay(left, right net.Conn) (int64, int64, error) {
-	type res struct {
-		N   int64
-		Err error
+func (profile *PhantomProfile) Dial(network, address string) (net.Conn, error) {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
 	}
-	ch := make(chan res)
+	pface, _ := profile.GetInterface(host)
+	if pface != nil {
+		return pface.PhantomDial(network, address)
+	}
+
+	return net.Dial(network, address)
+}
+
+func (pface *PhantomInterface) PhantomDial(network, address string) (net.Conn, error) {
+	connect_err := errors.New("connection does not exist")
+	c := &phantomConn{conn: nil, hint: pface.Hint, info: nil, header: nil}
+	host, str_port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	port, err := strconv.Atoi(str_port)
+	if err != nil {
+		return nil, err
+	}
+	raddrs, err := pface.GetRemoteAddresses(host, port)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := 0; i < len(raddrs); i++ {
+		raddr := raddrs[mathrand.Intn(len(raddrs))]
+		laddr, err := GetLocalTCPAddr(pface.Device, raddr.IP.To4() == nil)
+		if err != nil {
+			return nil, errors.New("invalid device")
+		}
+
+		if pface.Hint&HINT_FAKE != 0 {
+			c.conn, c.info, err = DialConnInfo(laddr, raddr, pface, nil)
+		} else {
+			c.conn, err = net.DialTCP("tcp", laddr, raddr)
+		}
+
+		if err != nil {
+			if IsNormalError(err) {
+				continue
+			}
+			return nil, err
+		}
+
+		break
+	}
+
+	if pface.Hint&HINT_FAKE != 0 {
+		if c.info == nil {
+			if c.conn != nil {
+				c.conn.Close()
+			}
+			return nil, connect_err
+		}
+
+		c.info.TCP.Seq++
+	}
+
+	if (pface.Hint & HINT_DELAY) != 0 {
+		time.Sleep(time.Second)
+	}
+
+	return c, nil
+}
+
+type phantomConn struct {
+	conn   net.Conn
+	hint   uint32
+	info   *ConnectionInfo
+	header []byte
+}
+
+func (c *phantomConn) Read(b []byte) (int, error) {
+	return c.conn.Read(b)
+}
+
+func (c *phantomConn) Write(b []byte) (int, error) {
+	if c.hint != 0 {
+		header := b
+		payloadLen := len(b)
+		if c.header == nil {
+			if header[0] == 0x16 {
+				headerLen := GetHelloLength(header) + 5
+				if payloadLen < headerLen {
+					c.header = make([]byte, payloadLen)
+					copy(c.header, b[:])
+					return payloadLen, nil
+				}
+			}
+		} else if c.header[0] == 0x16 {
+			headerLen := GetHelloLength(header) + 5
+			if len(c.header)+payloadLen >= headerLen {
+				header = make([]byte, len(c.header)+payloadLen)
+				copy(header, c.header)
+				copy(header[len(c.header):], b)
+				c.header = nil
+			}
+		}
+
+		if header[0] == 0x16 {
+			offset, length, _ := GetSNI(header)
+			if length > 0 {
+				if c.hint&HINT_TLSFRAG != 0 {
+					header = TLSFragment(header, offset+length/2)
+				}
+			}
+		}
+
+		if c.hint&HINT_TCPFRAG != 0 && payloadLen > 4 {
+			c.hint = 0
+			n1, err := c.conn.Write(header[:4])
+			if err != nil {
+				return n1, err
+			}
+			n2, err := c.conn.Write(header[4:])
+			return n1 + n2, err
+		}
+
+		c.hint = 0
+		return c.conn.Write(header)
+	}
+
+	return c.conn.Write(b)
+}
+
+func (c *phantomConn) Close() error {
+	return c.conn.Close()
+}
+
+func (c *phantomConn) LocalAddr() net.Addr {
+	return c.conn.LocalAddr()
+}
+
+func (c *phantomConn) RemoteAddr() net.Addr {
+	return c.conn.RemoteAddr()
+}
+
+func (c *phantomConn) SetDeadline(t time.Time) error {
+	return c.conn.SetDeadline(t)
+}
+
+func (c *phantomConn) SetReadDeadline(t time.Time) error {
+	return c.conn.SetReadDeadline(t)
+}
+
+func (c *phantomConn) SetWriteDeadline(t time.Time) error {
+	return c.conn.SetWriteDeadline(t)
+}
+
+func relay(left, right net.Conn) error {
+	errch := make(chan error, 2)
 
 	go func() {
-		n, err := io.Copy(right, left)
-		right.SetDeadline(time.Now())
-		left.SetDeadline(time.Now())
-		ch <- res{n, err}
+		_, err := io.Copy(right, left)
+		errch <- err
+	}()
+	go func() {
+		_, err := io.Copy(left, right)
+		errch <- err
 	}()
 
-	n, err := io.Copy(left, right)
-	right.SetDeadline(time.Now())
-	left.SetDeadline(time.Now())
-	rs := <-ch
-
-	if err == nil {
-		err = rs.Err
-	}
-	return n, rs.N, err
+	return <-errch
 }

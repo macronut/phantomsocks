@@ -112,36 +112,6 @@ func PACServer(listenAddr string, profile string, proxyAddr string) {
 	}
 }
 
-func DNSServer(listenAddr string) error {
-	addr, err := net.ResolveUDPAddr("udp", listenAddr)
-	if err != nil {
-		return err
-	}
-	conn, err := net.ListenUDP("udp", addr)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	fmt.Println("DNS:", listenAddr)
-	go ListenAndServe(listenAddr, "", ptcp.DNSTCPServer)
-
-	data := make([]byte, 512)
-	for {
-		n, clientAddr, err := conn.ReadFromUDP(data)
-		if err != nil {
-			continue
-		}
-
-		request := make([]byte, n)
-		copy(request, data[:n])
-		go func(clientAddr *net.UDPAddr, request []byte) {
-			_, response := ptcp.NSRequest(request, true)
-			conn.WriteToUDP(response, clientAddr)
-		}(clientAddr, request)
-	}
-}
-
 func StartService() {
 	conf, err := os.Open(ConfigFile)
 	if err != nil {
@@ -211,12 +181,14 @@ func StartService() {
 	for _, service := range ServiceConfig.Services {
 		switch service.Protocol {
 		case "dns":
+			fmt.Println("DNS:", service.Address)
 			go func(addr string) {
-				err := DNSServer(addr)
+				err := ptcp.DNSServer(addr)
 				if err != nil {
 					fmt.Println("DNS:", err)
 				}
 			}(service.Address)
+			go ListenAndServe(service.Address, "", ptcp.DNSTCPServer)
 		case "doh":
 			go func(addr string, certs []string) {
 				fmt.Println("DoH:", addr)
@@ -242,13 +214,15 @@ func StartService() {
 			go ListenAndServe(service.Address, service.PrivateKey, ptcp.RedirectProxy)
 		case "tproxy":
 			fmt.Println("TProxy:", service.Address)
+			go ptcp.TProxyTCP(service.Address)
 			go ptcp.TProxyUDP(service.Address)
 		case "tcp":
 			fmt.Println("TCP:", service.Address, service.Peers[0].Endpoint)
 			var l net.Listener
 			keys := strings.Split(service.PrivateKey, ",")
 			if len(keys) == 2 {
-				cer, err := tls.LoadX509KeyPair(keys[0], keys[1])
+				var cer tls.Certificate
+				cer, err = tls.LoadX509KeyPair(keys[0], keys[1])
 				if err == nil {
 					config := &tls.Config{Certificates: []tls.Certificate{cer}}
 					l, err = tls.Listen("tcp", service.Address, config)
@@ -265,12 +239,12 @@ func StartService() {
 				continue
 			}
 
-			go ptcp.TCPMapping(l, service.Peers[0].Endpoint)
+			go ptcp.TCPMapping(l, service.Peers)
 		case "udp":
 			go ptcp.UDPMapping(service.Address, service.Peers[0].Endpoint)
 		case "pac":
 			if default_proxy != "" {
-				go PACServer(service.Address, service.Profile, default_proxy)
+				go PACServer(service.Address, "", default_proxy)
 			}
 		case "reverse":
 			fmt.Println("Reverse:", service.Address)

@@ -47,8 +47,7 @@ var HintMap = map[string]uint32{
 	"df":         HINT_DF,
 	"sat":        HINT_SAT,
 	"rand":       HINT_RAND,
-	"s-seg":      HINT_SSEG,
-	"1-seg":      HINT_1SEG,
+	"tcp-frag":   HINT_TCPFRAG,
 	"tls-frag":   HINT_TLSFRAG,
 	"half-tfo":   HINT_HTFO,
 	"keep-alive": HINT_KEEPALIVE,
@@ -116,8 +115,7 @@ func connectionMonitor(layer uint8) {
 				synAddr = addr.String()
 				result, ok := ConnSyn.Load(synAddr)
 				if ok {
-					info := result.(SynInfo)
-					hint = info.Option
+					hint = result.(SynInfo).Hint
 				}
 			}
 
@@ -195,6 +193,7 @@ func connectionMonitor(layer uint8) {
 			var hint uint32 = 0
 			if synack {
 				hint = ConnWait6[tcp.DstPort]
+
 				if hint == 0 {
 					winDivert.Send(divertpacket)
 					continue
@@ -208,8 +207,7 @@ func connectionMonitor(layer uint8) {
 				synAddr = addr.String()
 				result, ok := ConnSyn.Load(synAddr)
 				if ok {
-					info := result.(SynInfo)
-					hint = info.Option
+					hint = result.(SynInfo).Hint
 				}
 			}
 			if hint != 0 {
@@ -247,13 +245,14 @@ func connectionMonitor(layer uint8) {
 							}
 
 							tfo_id := ip.HopLimit & 63
-							ip.HopLimit = 128
+							ip.HopLimit = 64
+
 							if tcp.SYN == true {
 								payload := TFOPayload[tfo_id]
 								if payload != nil {
 									ip.TrafficClass = 0
 									ModifyAndSendPacket(connInfo, payload, HINT_TFO, 0, count)
-									ConnWait4[srcPort] = hint
+									ConnWait6[srcPort] = hint
 								} else {
 									connInfo = nil
 								}
@@ -330,6 +329,7 @@ func ModifyAndSendPacket(connInfo *ConnectionInfo, payload []byte, hint uint32, 
 			}
 		case *layers.IPv6:
 			result, ok := TFOCookies.Load(ip.DstIP.String())
+			logPrintln(5, ip.DstIP.String(), "Cookies:", result)
 			if ok {
 				cookie = result.([]byte)
 			} else {
@@ -337,6 +337,8 @@ func ModifyAndSendPacket(connInfo *ConnectionInfo, payload []byte, hint uint32, 
 			}
 		}
 
+		tcpLayer.ECE = false
+		tcpLayer.CWR = false
 		tcpLayer.Options = append(connInfo.TCP.Options,
 			layers.TCPOption{34, uint8(len(cookie)), cookie},
 		)
@@ -596,4 +598,8 @@ func RedirectDNS() {
 			return
 		}
 	}
+}
+
+func SendUDPPacket(laddr *net.UDPAddr, raddr *net.UDPAddr, payload []byte, ttl uint8) error {
+	return nil
 }

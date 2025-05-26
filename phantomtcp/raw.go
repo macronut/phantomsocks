@@ -43,8 +43,7 @@ var HintMap = map[string]uint32{
 	"df":         HINT_DF,
 	"sat":        HINT_SAT,
 	"rand":       HINT_RAND,
-	"s-seg":      HINT_SSEG,
-	"1-seg":      HINT_1SEG,
+	"tcp-frag":   HINT_TCPFRAG,
 	"tls-frag":   HINT_TLSFRAG,
 	"half-tfo":   HINT_HTFO,
 	"keep-alive": HINT_KEEPALIVE,
@@ -56,8 +55,7 @@ func DevicePrint() {
 }
 
 func connectionMonitor(device string, ipv6 bool) {
-	var err error
-	localaddr, err := GetLocalAddr(device, ipv6)
+	localaddr, err := GetLocalTCPAddr(device, ipv6)
 	if err != nil {
 		logPrintln(1, device, err)
 		return
@@ -173,7 +171,7 @@ func ICMPMonitor(device string, ipv6 bool) {
 	fmt.Printf("Device: %v\n", device)
 
 	var err error
-	localaddr, err := GetLocalAddr(device, ipv6)
+	localaddr, err := GetLocalTCPAddr(device, ipv6)
 	if err != nil {
 		logPrintln(1, err)
 		return
@@ -377,4 +375,73 @@ func ModifyAndSendPacket(connInfo *ConnectionInfo, payload []byte, hint uint32, 
 	}
 
 	return nil
+}
+
+func SendUDPPacket(laddr *net.UDPAddr, raddr *net.UDPAddr, payload []byte, ttl uint8) error {
+	udpLayer := &layers.UDP{
+		SrcPort: layers.UDPPort(laddr.Port),
+		DstPort: layers.UDPPort(raddr.Port),
+	}
+
+	buffer := gopacket.NewSerializeBuffer()
+	var options gopacket.SerializeOptions
+	options.FixLengths = true
+	options.ComputeChecksums = true
+
+	var network string
+	ip4 := laddr.IP.To4()
+	if ip4 != nil {
+		ipLayer := &layers.IPv4{
+			SrcIP:    laddr.IP,
+			DstIP:    raddr.IP,
+			TTL:      ttl,
+			Protocol: layers.IPProtocolUDP,
+		}
+		network = "ip4:udp"
+
+		udpLayer.SetNetworkLayerForChecksum(ipLayer)
+		gopacket.SerializeLayers(buffer, options,
+			udpLayer, gopacket.Payload(payload),
+		)
+	} else {
+		ipLayer := &layers.IPv6{
+			SrcIP:      laddr.IP,
+			DstIP:      raddr.IP,
+			HopLimit:   ttl,
+			NextHeader: layers.IPProtocolUDP,
+		}
+		network = "ip6:udp"
+
+		udpLayer.SetNetworkLayerForChecksum(ipLayer)
+		gopacket.SerializeLayers(buffer, options,
+			udpLayer, gopacket.Payload(payload),
+		)
+	}
+
+	conn, err := net.DialIP(network, &net.IPAddr{laddr.IP, ""}, &net.IPAddr{raddr.IP, ""})
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	if ttl != 0 {
+		f, err := conn.File()
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		fd := int(f.Fd())
+		if network == "ip6:udp" {
+			err = syscall.SetsockoptInt(fd, syscall.IPPROTO_IPV6, syscall.IPV6_UNICAST_HOPS, int(ttl))
+		} else {
+			err = syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_TTL, int(ttl))
+		}
+		if err != nil {
+			return err
+		}
+	}
+
+	outgoingPacket := buffer.Bytes()
+	_, err = conn.Write(outgoingPacket)
+	return err
 }

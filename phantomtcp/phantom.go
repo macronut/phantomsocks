@@ -12,6 +12,8 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"os/exec"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,7 +27,7 @@ type ServiceConfig struct {
 	Method     string `json:"method,omitempty"`
 	Address    string `json:"address,omitempty"`
 	PrivateKey string `json:"privatekey,omitempty"`
-	Profile    string `json:"profile,omitempty"`
+	Interface  string `json:"interface,omitempty"`
 
 	Peers []Peer `json:"peers,omitempty"`
 }
@@ -57,6 +59,7 @@ type Peer struct {
 	Endpoint     string `json:"endpoint,omitempty"`
 	KeepAlive    int    `json:"keepalive,omitempty"`
 	AllowedIPs   string `json:"allowedips,omitempty"`
+	Script       string `json:"script,omitempty"`
 }
 
 const (
@@ -143,8 +146,7 @@ const (
 	HINT_DF        = 0x1 << 22
 	HINT_SAT       = 0x1 << 23
 	HINT_RAND      = 0x1 << 24
-	HINT_SSEG      = 0x1 << 25
-	HINT_1SEG      = 0x1 << 26
+	HINT_TCPFRAG   = 0x1 << 25
 	HINT_TLSFRAG   = 0x1 << 27
 	HINT_HTFO      = 0x1 << 28
 	HINT_KEEPALIVE = 0x1 << 29
@@ -153,8 +155,8 @@ const (
 )
 
 const HINT_DNS = HINT_ALPN | HINT_HTTPS | HINT_HTTP2 | HINT_HTTP3 | HINT_IPV4 | HINT_IPV6
-const HINT_FAKE = HINT_TTL | HINT_WMD5 | HINT_NACK | HINT_WACK | HINT_WCSUM | HINT_WSEQ | HINT_WTIME
-const HINT_MODIFY = HINT_FAKE | HINT_SSEG | HINT_1SEG | HINT_TLSFRAG | HINT_TFO | HINT_HTFO | HINT_MODE2 | HINT_MOVE | HINT_STRIP | HINT_FRONTING
+const HINT_FAKE = HINT_TTL | HINT_WMD5 | HINT_NACK | HINT_WACK | HINT_WCSUM | HINT_WSEQ | HINT_WTIME | HINT_TFO | HINT_HTFO
+const HINT_MODIFY = HINT_FAKE | HINT_TCPFRAG | HINT_TLSFRAG | HINT_MODE2 | HINT_MOVE | HINT_STRIP | HINT_FRONTING
 
 var Logger *log.Logger
 
@@ -549,6 +551,22 @@ func LoadProfile(filename string) error {
 					} else if keys[0] == "udpmapping" {
 						mapping := strings.SplitN(keys[1], ">", 2)
 						go UDPMapping(mapping[0], mapping[1])
+					} else if strings.HasSuffix(keys[0], "]") {
+						domain_type := strings.SplitN(keys[0][:len(keys[0])-1], "[", 2)
+						if len(domain_type) > 1 {
+							records, hasCache := DNSCache[domain_type[0]]
+							if hasCache {
+								switch domain_type[1] {
+								case "cname":
+									records.CName = keys[1]
+								case "ech":
+									records.Ech, err = base64.StdEncoding.DecodeString(keys[1])
+								}
+								if err != nil {
+									logPrintln(0, l, err)
+								}
+							}
+						}
 					} else {
 						if strings.HasPrefix(keys[1], "[") {
 							quote := keys[1][1 : len(keys[1])-1]
@@ -573,6 +591,7 @@ func LoadProfile(filename string) error {
 							for i := 0; i < len(addrs); i++ {
 								ip := net.ParseIP(addrs[i])
 								if ip == nil {
+									domain := addrs[i]
 									result, hasCache := DNSCache[addrs[i]]
 									if hasCache {
 										if records.IPv4Hint != nil {
@@ -588,7 +607,7 @@ func LoadProfile(filename string) error {
 											records.IPv6Hint.Addresses = append(records.IPv6Hint.Addresses, result.IPv6Hint.Addresses...)
 										}
 									} else {
-										log.Println(keys[0], addrs[i], "bad address")
+										result.CName = domain
 									}
 								} else {
 									ip4 := ip.To4()
@@ -859,7 +878,23 @@ func CreateInterfaces(Interfaces []InterfaceConfig) []string {
 
 		InterfaceMap[config.Name] = pface
 
-		if pface.Device != "" && Hint != 0 {
+		if Hint&HINT_FAKE != 0 {
+			if runtime.GOOS == "linux" && pface.Device == "" {
+				cmd := exec.Command("ip", "r")
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					logPrintln(0, err)
+					continue
+				}
+				for _, line := range strings.Split(string(out), "\n") {
+					route := strings.Fields(line)
+					if len(route) > 4 && route[0] == "default" {
+						pface.Device = route[4]
+						break
+					}
+				}
+			}
+
 			_, ok := InterfaceMap[pface.Device]
 			if !ok && !contains(devices, pface.Device) {
 				devices = append(devices, pface.Device)
@@ -883,6 +918,10 @@ func (config *ServiceConfig) StartService() {
 
 func (config *InterfaceConfig) StartClient() error {
 	return nil
+}
+
+func (pface *PhantomInterface) Upgrade(conn net.Conn, host string, port int, b []byte) (net.Conn, error) {
+	return nil, nil
 }
 
 func (pface *PhantomInterface) DialTCP(address *net.TCPAddr) (net.Conn, error) {

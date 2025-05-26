@@ -1,15 +1,15 @@
 package phantomtcp
 
 import (
+	"log"
 	"net"
 	"syscall"
 	"time"
+
+	"github.com/macronut/go-tproxy"
 )
 
 func DialConnInfo(laddr, raddr *net.TCPAddr, pface *PhantomInterface, payload []byte) (net.Conn, *ConnectionInfo, error) {
-	var conn net.Conn
-	var err error
-
 	addr := raddr.String()
 	timeout := time.Millisecond * time.Duration(pface.Timeout)
 
@@ -25,31 +25,24 @@ func DialConnInfo(laddr, raddr *net.TCPAddr, pface *PhantomInterface, payload []
 
 	AddConn(addr, pface.Hint)
 
-	if (pface.Hint&(HINT_TFO|HINT_HTFO|HINT_KEEPALIVE)) != 0 || (pface.MTU) > 0 {
-		d := net.Dialer{Timeout: timeout, LocalAddr: laddr,
-			Control: func(network, address string, c syscall.RawConn) error {
-				err := c.Control(func(fd uintptr) {
-					if (pface.MTU) > 0 {
-						syscall.SetsockoptInt(int(fd),
-							syscall.SOL_TCP, syscall.TCP_MAXSEG, int(pface.MTU))
-					}
-					if (pface.Hint & (HINT_TFO | HINT_HTFO)) != 0 {
-						//syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, 30, 1)
-						syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_TOS, tfo_id<<2)
-						syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_TTL, int(pface.TTL))
-					}
-					if (pface.Hint & HINT_KEEPALIVE) != 0 {
-						syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_KEEPALIVE, 1)
-					}
-				})
-				return err
-			}}
-		conn, err = d.Dial("tcp", addr)
-	} else {
-		d := net.Dialer{Timeout: timeout, LocalAddr: laddr}
-		conn, err = d.Dial("tcp", addr)
-	}
-
+	d := net.Dialer{Timeout: timeout, LocalAddr: laddr,
+		Control: func(network, address string, c syscall.RawConn) error {
+			err := c.Control(func(fd uintptr) {
+				if (pface.MTU) > 0 {
+					syscall.SetsockoptInt(int(fd), syscall.SOL_TCP, syscall.TCP_MAXSEG, int(pface.MTU))
+					//syscall.SetsockoptInt(int(fd), syscall.SOL_TCP, syscall.TCP_MSS, int(pface.MTU))
+				}
+				if (pface.Hint & (HINT_TFO | HINT_HTFO)) != 0 {
+					syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_TOS, tfo_id<<2)
+					syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_TTL, int(pface.TTL))
+				}
+				if (pface.Hint & HINT_KEEPALIVE) != 0 {
+					syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_KEEPALIVE, 1)
+				}
+			})
+			return err
+		}}
+	conn, err := d.Dial("tcp", addr)
 	if err != nil {
 		DelConn(raddr.String())
 		return nil, nil, err
@@ -196,4 +189,34 @@ func SendWithOption(conn net.Conn, payload []byte, tos int, ttl int) error {
 	}
 
 	return nil
+}
+
+func TProxyTCP(address string) {
+	laddr, err := net.ResolveTCPAddr("tcp", address)
+	if err != nil {
+		log.Panic(err)
+	}
+	l, err := tproxy.ListenTCP("tcp", laddr)
+	if err != nil {
+		log.Panic(err)
+	}
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			logPrintln(1, err)
+			continue
+		}
+		go func(conn net.Conn) {
+			addr := conn.LocalAddr().(*net.TCPAddr)
+			ip4 := addr.IP.To4()
+			port := addr.Port
+			if ip4 != nil {
+				TCPAddr := net.TCPAddr{IP: ip4, Port: port, Zone: ""}
+				tcp_redirect(conn, &TCPAddr, "", nil)
+			} else {
+				TCPAddr := net.TCPAddr{IP: addr.IP, Port: port, Zone: ""}
+				tcp_redirect(conn, &TCPAddr, "", nil)
+			}
+		}(conn)
+	}
 }

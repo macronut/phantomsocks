@@ -5,6 +5,7 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -247,10 +248,9 @@ func UDPMapping(Address string, Target string) error {
 	}
 }
 
-func TCPMapping(Listener net.Listener, Hosts string) error {
+func TCPMapping(Listener net.Listener, Peers []Peer) error {
 	defer Listener.Close()
 
-	HostList := strings.Split(Hosts, ",")
 	for {
 		client, err := Listener.Accept()
 		if err != nil {
@@ -258,12 +258,23 @@ func TCPMapping(Listener net.Listener, Hosts string) error {
 			return err
 		}
 
-		Host := HostList[rand.Intn(len(HostList))]
+		Peer := Peers[rand.Intn(len(Peers))]
 
-		logPrintln(3, "[TCP]", client.RemoteAddr().String(), Host)
+		logPrintln(3, "[TCP]", client.RemoteAddr().String(), Peer.Endpoint)
 
 		go func() {
-			remote, err := net.Dial("tcp", Host)
+			if Peer.Script != "" {
+				args := strings.Fields(Peer.Script)
+				cmd := exec.Command(args[0])
+				cmd.Args = args
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					logPrintln(0, err, cmd, string(out))
+					return
+				}
+			}
+
+			remote, err := net.Dial("tcp", Peer.Endpoint)
 			if err != nil {
 				logPrintln(1, err)
 				return

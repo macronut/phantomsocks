@@ -163,7 +163,6 @@ func GetHeader(conn net.Conn) ([]byte, error) {
 			return nil, errors.New("tls hello is too big")
 		}
 		if headerLen > n {
-			logPrintln(2, "tls big hello")
 			header := make([]byte, headerLen)
 			copy(header[:], buf[:n])
 			n, err = conn.Read(header[n:])
@@ -354,12 +353,13 @@ func tcp_redirect(client net.Conn, addr *net.TCPAddr, domain string, header []by
 
 					if pface.Hint&HINT_TLSFRAG != 0 {
 						header = TLSFragment(header, offset+length/2)
+						offset += 2
 					}
 				}
 
 				logPrintln(1, "Redirect:", client.RemoteAddr(), "->", domain, port, pface.Device, time.Since(start_time))
 
-				conn, _, err = pface.Dial(nil, domain, port, header)
+				conn, _, err = pface.dial(domain, port, header, offset, length)
 				if err == nil {
 					var server_hello [4096]byte
 					var helloLen int
@@ -380,7 +380,7 @@ func tcp_redirect(client net.Conn, addr *net.TCPAddr, domain string, header []by
 				if err != nil && pface.Fallback != nil {
 					pface = pface.Fallback
 					logPrintln(1, "Redirect:", client.RemoteAddr(), "->", domain, port, pface.Device, time.Since(start_time))
-					conn, _, err = pface.Dial(nil, domain, port, header)
+					conn, _, err = pface.dial(domain, port, header, offset, length)
 				}
 
 				if err != nil {
@@ -417,11 +417,11 @@ func tcp_redirect(client net.Conn, addr *net.TCPAddr, domain string, header []by
 					}
 				} else {
 					var info *ConnectionInfo
-					conn, info, err = pface.Dial(nil, domain, port, header)
+					conn, info, err = pface.dial(domain, port, header, 0, 0)
 					if err != nil && pface.Fallback != nil {
 						pface = pface.Fallback
 						logPrintln(1, "Redirect:", client.RemoteAddr(), "->", domain, port, pface.Device, time.Since(start_time))
-						conn, _, err = pface.Dial(nil, domain, port, header)
+						conn, _, err = pface.dial(domain, port, header, 0, 0)
 					}
 
 					if err != nil {
@@ -464,7 +464,7 @@ func tcp_redirect(client net.Conn, addr *net.TCPAddr, domain string, header []by
 
 	defer conn.Close()
 
-	_, _, err = relay(client, conn)
+	err = relay(client, conn)
 	if err != nil {
 		if err, ok := err.(net.Error); ok && err.Timeout() {
 			return // ignore i/o timeout
@@ -758,7 +758,7 @@ func (pface *PhantomInterface) ProxyHandshake(conn net.Conn, synpacket *Connecti
 			fakepayload := make([]byte, len(request))
 			var n int = 0
 			if synpacket != nil {
-				if hint&HINT_SSEG != 0 {
+				if hint&HINT_TCPFRAG != 0 {
 					n, err = conn.Write(request[:4])
 					if err != nil {
 						return conn, err
@@ -776,7 +776,7 @@ func (pface *PhantomInterface) ProxyHandshake(conn net.Conn, synpacket *Connecti
 					return conn, err
 				}
 
-				if hint&HINT_SSEG != 0 {
+				if hint&HINT_TCPFRAG != 0 {
 					n, err = conn.Write(request[4:])
 				} else if hint&HINT_MODE2 != 0 {
 					n, err = conn.Write(request[10:])
