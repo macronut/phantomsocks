@@ -142,16 +142,16 @@ func GetLocalTCPAddr(name string, ipv6 bool) (*net.TCPAddr, error) {
 	return nil, nil
 }
 
-func (pface *PhantomInterface) dial(host string, port int, b []byte, offset int, length int) (net.Conn, *ConnectionInfo, error) {
+func (outbound *Outbound) dial(host string, port int, b []byte, offset int, length int) (net.Conn, *ConnectionInfo, error) {
 	var conn net.Conn
-	raddrs, err := pface.GetRemoteAddresses(host, port)
+	raddrs, err := outbound.GetRemoteAddresses(host, port)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	connect_err := errors.New("connection does not exist")
-	device := pface.Device
-	hint := pface.Hint
+	device := outbound.Device
+	hint := outbound.Hint
 
 	if hint&HINT_FAKE == 0 {
 		if conn == nil {
@@ -170,7 +170,7 @@ func (pface *PhantomInterface) dial(host string, port int, b []byte, offset int,
 			}
 		}
 
-		proxyConn, err := pface.ProxyHandshake(conn, nil, host, port, b)
+		proxyConn, err := outbound.ProxyHandshake(conn, nil, host, port, b)
 		if err != nil {
 			conn.Close()
 			return nil, nil, err
@@ -222,7 +222,7 @@ func (pface *PhantomInterface) dial(host string, port int, b []byte, offset int,
 
 			conn, err = net.DialTCP("tcp", laddr, raddr)
 			if err == nil {
-				conn, err = pface.ProxyHandshake(conn, nil, host, port, nil)
+				conn, err = outbound.ProxyHandshake(conn, nil, host, port, nil)
 			}
 
 			if err == nil && b != nil {
@@ -230,7 +230,7 @@ func (pface *PhantomInterface) dial(host string, port int, b []byte, offset int,
 					cut := offset + length/2
 					tos := 1 << 2
 					if hint&HINT_TTL != 0 {
-						tos = int(pface.TTL) << 2
+						tos = int(outbound.TTL) << 2
 					}
 					if SendWithOption(conn, b[:cut], tos, 1) == nil {
 						_, err = conn.Write(b[cut:])
@@ -301,7 +301,7 @@ func (pface *PhantomInterface) dial(host string, port int, b []byte, offset int,
 					return nil, nil, errors.New("invalid device")
 				}
 
-				conn, synpacket, err = DialConnInfo(laddr, raddr, pface, tfo_payload)
+				conn, synpacket, err = DialConnInfo(laddr, raddr, outbound, tfo_payload)
 				if err != nil {
 					if IsNormalError(err) {
 						continue
@@ -327,13 +327,13 @@ func (pface *PhantomInterface) dial(host string, port int, b []byte, offset int,
 
 			synpacket.TCP.Seq++
 
-			if pface.Protocol != 0 {
-				conn, err = pface.ProxyHandshake(conn, synpacket, host, port, nil)
+			if outbound.Protocol != 0 {
+				conn, err = outbound.ProxyHandshake(conn, synpacket, host, port, nil)
 				if err != nil {
 					conn.Close()
 					return nil, nil, err
 				}
-				if pface.Protocol == HTTPS {
+				if outbound.Protocol == HTTPS {
 					conn.Write(b)
 					return conn, synpacket, nil
 				}
@@ -355,7 +355,7 @@ func (pface *PhantomInterface) dial(host string, port int, b []byte, offset int,
 					fakepayload = fakepayload[cut:]
 					count = 2
 				} else {
-					err = send_magic_packet(synpacket, fakepayload, hint, pface.TTL, count)
+					err = send_magic_packet(synpacket, fakepayload, hint, outbound.TTL, count)
 					if err != nil {
 						conn.Close()
 						return nil, nil, err
@@ -381,7 +381,7 @@ func (pface *PhantomInterface) dial(host string, port int, b []byte, offset int,
 					return nil, nil, err
 				}
 
-				err = send_magic_packet(synpacket, fakepayload, hint, pface.TTL, count)
+				err = send_magic_packet(synpacket, fakepayload, hint, outbound.TTL, count)
 				if err != nil {
 					conn.Close()
 					return nil, nil, err
@@ -400,7 +400,7 @@ func (pface *PhantomInterface) dial(host string, port int, b []byte, offset int,
 						conn.Close()
 						return nil, nil, err
 					}
-					err = send_magic_packet(synpacket, fakepayload, hint, pface.TTL, 2)
+					err = send_magic_packet(synpacket, fakepayload, hint, outbound.TTL, 2)
 				}
 			}
 
@@ -409,7 +409,7 @@ func (pface *PhantomInterface) dial(host string, port int, b []byte, offset int,
 	}
 }
 
-func (pface *PhantomInterface) Keep(client, conn net.Conn, connInfo *ConnectionInfo) {
+func (outbound *Outbound) Keep(client, conn net.Conn, connInfo *ConnectionInfo) {
 	fakepayload := make([]byte, 1500)
 
 	go func() {
@@ -421,7 +421,7 @@ func (pface *PhantomInterface) Keep(client, conn net.Conn, connInfo *ConnectionI
 				return
 			}
 
-			err = ModifyAndSendPacket(connInfo, fakepayload, pface.Hint, pface.TTL, 2)
+			err = ModifyAndSendPacket(connInfo, fakepayload, outbound.Hint, outbound.TTL, 2)
 			if err != nil {
 				conn.Close()
 				return
@@ -438,15 +438,15 @@ func (pface *PhantomInterface) Keep(client, conn net.Conn, connInfo *ConnectionI
 	io.Copy(client, conn)
 }
 
-func (pface *PhantomInterface) GetRemoteAddresses(host string, port int) ([]*net.TCPAddr, error) {
-	switch pface.Protocol {
+func (outbound *Outbound) GetRemoteAddresses(host string, port int) ([]*net.TCPAddr, error) {
+	switch outbound.Protocol {
 	case DIRECT:
-		return pface.ResolveTCPAddrs(host, port)
+		return outbound.ResolveTCPAddrs(host, port)
 	case REDIRECT:
-		if pface.Address != "" {
+		if outbound.Address != "" {
 			var str_port string
 			var err error
-			host, str_port, err = net.SplitHostPort(pface.Address)
+			host, str_port, err = net.SplitHostPort(outbound.Address)
 			if err != nil {
 				return nil, err
 			}
@@ -455,20 +455,20 @@ func (pface *PhantomInterface) GetRemoteAddresses(host string, port int) ([]*net
 				return nil, err
 			}
 		}
-		return pface.ResolveTCPAddrs(host, port)
+		return outbound.ResolveTCPAddrs(host, port)
 	case NAT64:
-		addrs, err := pface.ResolveTCPAddrs(host, port)
+		addrs, err := outbound.ResolveTCPAddrs(host, port)
 		if err != nil {
 			return nil, err
 		}
 		tcpAddrs := make([]*net.TCPAddr, len(addrs))
 		for i, addr := range addrs {
-			proxy := pface.Address + addr.IP.String()
+			proxy := outbound.Address + addr.IP.String()
 			tcpAddrs[i] = &net.TCPAddr{IP: net.ParseIP(proxy), Port: port}
 		}
 		return tcpAddrs, nil
 	default:
-		host, str_port, err := net.SplitHostPort(pface.Address)
+		host, str_port, err := net.SplitHostPort(outbound.Address)
 		if err != nil {
 			return nil, err
 		}
@@ -476,8 +476,8 @@ func (pface *PhantomInterface) GetRemoteAddresses(host string, port int) ([]*net
 		if err != nil {
 			return nil, err
 		}
-		pface, _ := DefaultProfile.GetInterface(host)
-		return pface.ResolveTCPAddrs(host, port)
+		outbound, _ := DefaultProfile.GetOutbound(host)
+		return outbound.ResolveTCPAddrs(host, port)
 	}
 }
 
@@ -486,17 +486,17 @@ func (profile *PhantomProfile) Dial(network, address string) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	pface, _ := profile.GetInterface(host)
-	if pface != nil {
-		return pface.PhantomDial(network, address)
+	outbound, _ := profile.GetOutbound(host)
+	if outbound != nil {
+		return outbound.PhantomDial(network, address)
 	}
 
 	return net.Dial(network, address)
 }
 
-func (pface *PhantomInterface) PhantomDial(network, address string) (net.Conn, error) {
+func (outbound *Outbound) PhantomDial(network, address string) (net.Conn, error) {
 	connect_err := errors.New("connection does not exist")
-	c := &phantomConn{conn: nil, hint: pface.Hint, info: nil, header: nil}
+	c := &phantomConn{conn: nil, hint: outbound.Hint, info: nil, header: nil}
 	host, str_port, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, err
@@ -505,20 +505,20 @@ func (pface *PhantomInterface) PhantomDial(network, address string) (net.Conn, e
 	if err != nil {
 		return nil, err
 	}
-	raddrs, err := pface.GetRemoteAddresses(host, port)
+	raddrs, err := outbound.GetRemoteAddresses(host, port)
 	if err != nil {
 		return nil, err
 	}
 
 	for i := 0; i < len(raddrs); i++ {
 		raddr := raddrs[mathrand.Intn(len(raddrs))]
-		laddr, err := GetLocalTCPAddr(pface.Device, raddr.IP.To4() == nil)
+		laddr, err := GetLocalTCPAddr(outbound.Device, raddr.IP.To4() == nil)
 		if err != nil {
 			return nil, errors.New("invalid device")
 		}
 
-		if pface.Hint&HINT_FAKE != 0 {
-			c.conn, c.info, err = DialConnInfo(laddr, raddr, pface, nil)
+		if outbound.Hint&HINT_FAKE != 0 {
+			c.conn, c.info, err = DialConnInfo(laddr, raddr, outbound, nil)
 		} else {
 			c.conn, err = net.DialTCP("tcp", laddr, raddr)
 		}
@@ -533,7 +533,7 @@ func (pface *PhantomInterface) PhantomDial(network, address string) (net.Conn, e
 		break
 	}
 
-	if pface.Hint&HINT_FAKE != 0 {
+	if outbound.Hint&HINT_FAKE != 0 {
 		if c.info == nil {
 			if c.conn != nil {
 				c.conn.Close()
@@ -544,7 +544,7 @@ func (pface *PhantomInterface) PhantomDial(network, address string) (net.Conn, e
 		c.info.TCP.Seq++
 	}
 
-	if (pface.Hint & HINT_DELAY) != 0 {
+	if (outbound.Hint & HINT_DELAY) != 0 {
 		time.Sleep(time.Second)
 	}
 

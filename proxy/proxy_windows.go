@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"github.com/chai2010/winsvc"
 	"golang.org/x/sys/windows/registry"
@@ -21,15 +20,15 @@ func SetProxy(dev, address string, state bool) error {
 		return err
 	}
 
-	proxyTCPAddr, err := net.ResolveTCPAddr("tcp", u.Host)
-	if err != nil {
-		return err
-	}
-
 	if state {
 		switch u.Scheme {
 		case "redirect":
 			if state {
+				proxyTCPAddr, err := net.ResolveTCPAddr("tcp", u.Host)
+				if err != nil {
+					return err
+				}
+
 				go ptcp.Redirect(proxyTCPAddr.IP.String(), proxyTCPAddr.Port, true)
 				go ptcp.RedirectDNS()
 			}
@@ -41,25 +40,45 @@ func SetProxy(dev, address string, state bool) error {
 				return err
 			}
 		case "socks":
+			proxyTCPAddr, err := net.ResolveTCPAddr("tcp", u.Host)
+			if err != nil {
+				return err
+			}
 			key, _, _ := registry.CreateKey(registry.CURRENT_USER, `SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings`, registry.ALL_ACCESS)
 			key.SetStringValue(`ProxyServer`, "socks="+u.Host)
 			key.SetDWordValue(`ProxyEnable`, uint32(1))
 			defer key.Close()
 
 			q := u.Query()
-			dns, ok := q["dns"]
+			ifs, ok := q["if"]
 			if ok {
-				for _, dnsname := range dns {
-					dnsconf := strings.SplitN(dnsname, "@", 2)
-					if len(dnsconf) == 2 {
-						arg := []string{"interface", "ip", "set", "dnsservers", dnsconf[1], "static", dnsconf[0], "primary"}
-						cmd := exec.Command("netsh", arg...)
-						_, err := cmd.CombinedOutput()
-						if err != nil {
-							return err
-						}
+				for _, netif := range ifs {
+					arg := []string{"interface", "ip", "set", "dnsservers", netif, "static", proxyTCPAddr.IP.String(), "primary"}
+					cmd := exec.Command("netsh", arg...)
+					_, err := cmd.CombinedOutput()
+					if err != nil {
+						return err
 					}
 				}
+			}
+		case "dns":
+			q := u.Query()
+			ifs, ok := q["if"]
+			if ok {
+				for _, netif := range ifs {
+					arg := []string{"interface", "ip", "set", "dnsservers", netif, "static", u.Host, "primary"}
+					cmd := exec.Command("netsh", arg...)
+					_, err := cmd.CombinedOutput()
+					if err != nil {
+						return err
+					}
+				}
+			}
+			arg := []string{"/flushdns"}
+			cmd := exec.Command("ipconfig", arg...)
+			_, err := cmd.CombinedOutput()
+			if err != nil {
+				return err
 			}
 		default:
 			return nil
@@ -72,17 +91,27 @@ func SetProxy(dev, address string, state bool) error {
 			defer key.Close()
 
 			q := u.Query()
-			dns, ok := q["dns"]
+			ifs, ok := q["if"]
 			if ok {
-				for _, dnsname := range dns {
-					dnsconf := strings.SplitN(dnsname, "@", 2)
-					if len(dnsconf) == 2 {
-						arg := []string{"interface", "ip", "set", "dnsservers", dnsconf[1], "dhcp"}
-						cmd := exec.Command("netsh", arg...)
-						_, err := cmd.CombinedOutput()
-						if err != nil {
-							return err
-						}
+				for _, netinterface := range ifs {
+					arg := []string{"interface", "ip", "set", "dnsservers", netinterface, "dhcp"}
+					cmd := exec.Command("netsh", arg...)
+					_, err := cmd.CombinedOutput()
+					if err != nil {
+						return err
+					}
+				}
+			}
+		case "dns":
+			q := u.Query()
+			ifs, ok := q["if"]
+			if ok {
+				for _, netif := range ifs {
+					arg := []string{"interface", "ip", "set", "dnsservers", netif, "dhcp"}
+					cmd := exec.Command("netsh", arg...)
+					_, err := cmd.CombinedOutput()
+					if err != nil {
+						return err
 					}
 				}
 			}

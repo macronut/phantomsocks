@@ -80,8 +80,8 @@ func relayUDP(left, right net.Conn) error {
 	return err
 }
 
-func (pface *PhantomInterface) DialUDPProxy(host string, port int) (net.Conn, net.Conn, error) {
-	raddrs, err := pface.GetRemoteAddresses(host, port)
+func (outbound *Outbound) DialUDPProxy(host string, port int) (net.Conn, net.Conn, error) {
+	raddrs, err := outbound.GetRemoteAddresses(host, port)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -90,15 +90,15 @@ func (pface *PhantomInterface) DialUDPProxy(host string, port int) (net.Conn, ne
 	proxy_err := errors.New("invalid proxy")
 	var tcpConn net.Conn = nil
 
-	switch pface.Protocol {
+	switch outbound.Protocol {
 	case DIRECT:
 		fallthrough
 	case REDIRECT:
 		fallthrough
 	case NAT64:
 		var laddr *net.UDPAddr = nil
-		if pface.Device != "" {
-			_laddr, err := GetLocalTCPAddr(pface.Device, raddr.IP.To4() == nil)
+		if outbound.Device != "" {
+			_laddr, err := GetLocalTCPAddr(outbound.Device, raddr.IP.To4() == nil)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -111,14 +111,14 @@ func (pface *PhantomInterface) DialUDPProxy(host string, port int) (net.Conn, ne
 		var synpacket *ConnectionInfo
 		var hint uint32 = 0
 
-		laddr, err := GetLocalTCPAddr(pface.Device, raddr.IP.To4() == nil)
+		laddr, err := GetLocalTCPAddr(outbound.Device, raddr.IP.To4() == nil)
 		if err != nil {
 			return nil, nil, err
 		}
 
-		hint = pface.Hint & HINT_MODIFY
+		hint = outbound.Hint & HINT_MODIFY
 		if hint != 0 {
-			tcpConn, synpacket, err = DialConnInfo(laddr, raddr, pface, nil)
+			tcpConn, synpacket, err = DialConnInfo(laddr, raddr, outbound, nil)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -139,7 +139,7 @@ func (pface *PhantomInterface) DialUDPProxy(host string, port int) (net.Conn, ne
 
 		var b [264]byte
 		if hint != 0 {
-			err := ModifyAndSendPacket(synpacket, b[:], hint, pface.TTL, 2)
+			err := ModifyAndSendPacket(synpacket, b[:], hint, outbound.TTL, 2)
 			if err != nil {
 				tcpConn.Close()
 				return nil, nil, err
@@ -258,9 +258,9 @@ func GetLocalUDPAddr(name string, ipv6 bool) (*net.UDPAddr, error) {
 	return nil, nil
 }
 
-func StartHolePunching(service ServiceConfig) {
+func StartHolePunching(inbound InboundConfig) {
 	network := "udp6"
-	laddr, err := net.ResolveUDPAddr(network, service.Address)
+	laddr, err := net.ResolveUDPAddr(network, inbound.Address)
 	if err != nil {
 		logPrintln(1, err)
 		return
@@ -270,8 +270,8 @@ func StartHolePunching(service ServiceConfig) {
 	payload := make([]byte, 4)
 
 	for {
-		if service.Device != "" {
-			laddr, err = GetLocalUDPAddr(service.Device, ipv6)
+		if inbound.Device != "" {
+			laddr, err = GetLocalUDPAddr(inbound.Device, ipv6)
 			if err == nil {
 				laddr.Port = sport
 			}
@@ -281,7 +281,7 @@ func StartHolePunching(service ServiceConfig) {
 			}
 		}
 
-		for _, peer := range service.Peers {
+		for _, peer := range inbound.Peers {
 			raddr, err := net.ResolveUDPAddr(network, peer.Endpoint)
 			if err == nil {
 				err = SendUDPPacket(laddr, raddr, payload, 2)

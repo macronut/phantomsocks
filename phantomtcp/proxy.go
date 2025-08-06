@@ -15,10 +15,6 @@ import (
 	"time"
 )
 
-func ReadAtLeast() {
-
-}
-
 func SocksProxy(client net.Conn) {
 	defer client.Close()
 
@@ -265,19 +261,41 @@ func SNIProxy(client net.Conn) {
 	tcp_redirect(client, &net.TCPAddr{Port: port}, host, header)
 }
 
-func RedirectProxy(client net.Conn) {
-	addr, err := GetOriginalDST(client.(*net.TCPConn))
+func RedirectTCP(address string) {
+	var l net.Listener = nil
+	l, err := net.Listen("tcp", address)
 	if err != nil {
-		client.Close()
-		logPrintln(1, err)
-		return
+		log.Panic(err)
 	}
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			log.Panic(err)
+		}
 
-	if addr.String() == client.LocalAddr().String() {
-		client.Close()
-		return
+		addr, err := GetOriginalDST(conn.(*net.TCPConn))
+		if err != nil {
+			conn.Close()
+			logPrintln(1, err)
+			return
+		}
+
+		ipv4 := addr.IP.To4()
+		if ipv4 != nil {
+			addr.IP = ipv4
+		}
+
+		if addr.IP[0] == VirtualAddrPrefix {
+			go tcp_redirect(conn, addr, "", nil)
+		} else if addr.String() != conn.LocalAddr().String() {
+			go tcp_redirect(conn, addr, "", nil)
+		} else {
+			conn.Close()
+		}
 	}
-	tcp_redirect(client, addr, "", nil)
+}
+
+func RedirectUDP(address string) {
 }
 
 func tcp_redirect(client net.Conn, addr *net.TCPAddr, domain string, header []byte) {
@@ -288,41 +306,43 @@ func tcp_redirect(client net.Conn, addr *net.TCPAddr, domain string, header []by
 	var conn net.Conn
 	var err error
 	{
-		var pface *PhantomInterface = nil
+		var outbound *Outbound = nil
 		port := addr.Port
 
 		if domain == "" {
 			switch addr.IP[0] {
 			case 0x00:
-				index := int(binary.BigEndian.Uint32(addr.IP[12:16]))
+				index := int(binary.BigEndian.Uint16(addr.IP[14:16]))
 				if index >= len(Nose) {
+					logPrintln(3, index, "in", addr.IP, "out of range")
 					return
 				}
-				domain, pface = GetDNSLie(index)
+				domain, outbound = GetDNSLie(index)
 				addr.IP = nil
 			case VirtualAddrPrefix:
 				index := int(binary.BigEndian.Uint16(addr.IP[2:4]))
 				if index >= len(Nose) {
+					logPrintln(3, index, "in", addr.IP, "out of range")
 					return
 				}
-				domain, pface = GetDNSLie(index)
+				domain, outbound = GetDNSLie(index)
 				addr.IP = nil
 			}
 		}
 
-		if pface == nil {
+		if outbound == nil {
 			if domain == "" {
-				pface = DefaultProfile.GetInterfaceByIP(addr.IP)
-				if pface != nil {
+				outbound = DefaultProfile.GetOutboundByIP(addr.IP)
+				if outbound != nil {
 					domain = addr.IP.String()
 				}
 			} else {
-				pface, _ = DefaultProfile.GetInterface(domain)
+				outbound, _ = DefaultProfile.GetOutbound(domain)
 			}
 		}
 
-		if pface != nil && (pface.Protocol != 0 || pface.Hint != 0) {
-			if pface.Hint&HINT_NOTCP != 0 {
+		if outbound != nil && (outbound.Protocol != 0 || outbound.Hint != 0) {
+			if outbound.Hint&HINT_NOTCP != 0 {
 				time.Sleep(time.Second)
 				return
 			}
@@ -343,27 +363,27 @@ func tcp_redirect(client net.Conn, addr *net.TCPAddr, domain string, header []by
 						if ech {
 							logPrintln(2, domain, "tls hello with ECH", sni)
 						} else {
-							pface, _ = DefaultProfile.GetInterface(sni)
-							if pface == nil {
+							outbound, _ = DefaultProfile.GetOutbound(sni)
+							if outbound == nil {
 								return
 							}
 							domain = sni
 						}
 					}
 
-					if pface.Hint&HINT_TLSFRAG != 0 {
+					if outbound.Hint&HINT_TLSFRAG != 0 {
 						header = TLSFragment(header, offset+length/2)
 						offset += 2
 					}
 				}
 
-				logPrintln(1, "Redirect:", client.RemoteAddr(), "->", domain, port, pface.Device, time.Since(start_time))
+				logPrintln(1, "Redirect:", client.RemoteAddr(), "->", domain, port, outbound.Device, time.Since(start_time))
 
-				conn, _, err = pface.dial(domain, port, header, offset, length)
+				conn, _, err = outbound.dial(domain, port, header, offset, length)
 				if err == nil {
 					var server_hello [4096]byte
 					var helloLen int
-					err = conn.SetReadDeadline(time.Now().Add(time.Millisecond * time.Duration(pface.Timeout)))
+					err = conn.SetReadDeadline(time.Now().Add(time.Millisecond * time.Duration(outbound.Timeout)))
 					if err == nil {
 						helloLen, err = conn.Read(server_hello[:])
 					}
@@ -377,10 +397,10 @@ func tcp_redirect(client net.Conn, addr *net.TCPAddr, domain string, header []by
 					}
 				}
 
-				if err != nil && pface.Fallback != nil {
-					pface = pface.Fallback
-					logPrintln(1, "Redirect:", client.RemoteAddr(), "->", domain, port, pface.Device, time.Since(start_time))
-					conn, _, err = pface.dial(domain, port, header, offset, length)
+				if err != nil && outbound.Fallback != nil {
+					outbound = outbound.Fallback
+					logPrintln(1, "Redirect:", client.RemoteAddr(), "->", domain, port, outbound.Device, time.Since(start_time))
+					conn, _, err = outbound.dial(domain, port, header, offset, length)
 				}
 
 				if err != nil {
@@ -388,22 +408,22 @@ func tcp_redirect(client net.Conn, addr *net.TCPAddr, domain string, header []by
 					return
 				}
 			} else {
-				logPrintln(1, "Redirect:", client.RemoteAddr(), "->", domain, port, pface.Device, time.Since(start_time))
-				if pface.Hint&HINT_HTTP3 != 0 {
+				logPrintln(1, "Redirect:", client.RemoteAddr(), "->", domain, port, outbound.Device, time.Since(start_time))
+				if outbound.Hint&HINT_HTTP3 != 0 {
 					HttpMove(client, "h3", header)
 					return
-				} else if pface.Hint&HINT_HTTPS != 0 {
+				} else if outbound.Hint&HINT_HTTPS != 0 {
 					HttpMove(client, "https", header)
 					return
-				} else if pface.Hint&HINT_MOVE != 0 {
-					HttpMove(client, pface.Address, header)
+				} else if outbound.Hint&HINT_MOVE != 0 {
+					HttpMove(client, outbound.Address, header)
 					return
-				} else if pface.Hint&HINT_STRIP != 0 {
-					if pface.Hint&HINT_FRONTING != 0 {
-						conn, err = pface.DialStrip(domain, "")
+				} else if outbound.Hint&HINT_STRIP != 0 {
+					if outbound.Hint&HINT_FRONTING != 0 {
+						conn, err = outbound.DialStrip(domain, "")
 						domain = ""
 					} else {
-						conn, err = pface.DialStrip(domain, domain)
+						conn, err = outbound.DialStrip(domain, domain)
 					}
 
 					if err != nil {
@@ -417,11 +437,11 @@ func tcp_redirect(client net.Conn, addr *net.TCPAddr, domain string, header []by
 					}
 				} else {
 					var info *ConnectionInfo
-					conn, info, err = pface.dial(domain, port, header, 0, 0)
-					if err != nil && pface.Fallback != nil {
-						pface = pface.Fallback
-						logPrintln(1, "Redirect:", client.RemoteAddr(), "->", domain, port, pface.Device, time.Since(start_time))
-						conn, _, err = pface.dial(domain, port, header, 0, 0)
+					conn, info, err = outbound.dial(domain, port, header, 0, 0)
+					if err != nil && outbound.Fallback != nil {
+						outbound = outbound.Fallback
+						logPrintln(1, "Redirect:", client.RemoteAddr(), "->", domain, port, outbound.Device, time.Since(start_time))
+						conn, _, err = outbound.dial(domain, port, header, 0, 0)
 					}
 
 					if err != nil {
@@ -430,7 +450,7 @@ func tcp_redirect(client net.Conn, addr *net.TCPAddr, domain string, header []by
 					}
 
 					if info != nil {
-						pface.Keep(client, conn, info)
+						outbound.Keep(client, conn, info)
 						return
 					}
 				}
@@ -499,11 +519,11 @@ func QUICProxy(address string) {
 		} else {
 			SNI := GetQUICSNI(data[:n])
 			if SNI != "" {
-				pface, _ := DefaultProfile.GetInterface(SNI)
-				if pface.Hint&HINT_UDP == 0 {
+				outbound, _ := DefaultProfile.GetOutbound(SNI)
+				if outbound.Hint&HINT_UDP == 0 {
 					continue
 				}
-				_, ips := pface.NSLookup(SNI)
+				_, ips := outbound.NSLookup(SNI)
 				if ips == nil {
 					continue
 				}
@@ -516,7 +536,7 @@ func QUICProxy(address string) {
 					continue
 				}
 
-				if pface.Hint&HINT_ZERO != 0 {
+				if outbound.Hint&HINT_ZERO != 0 {
 					zero_data := make([]byte, 8+rand.Intn(1024))
 					_, err = udpConn.Write(zero_data)
 					if err != nil {
@@ -601,20 +621,20 @@ func SocksUDPProxy(address string) {
 				if index >= len(Nose) {
 					return
 				}
-				var pface *PhantomInterface
-				host, pface = GetDNSLie(index)
-				if pface.Protocol != 0 {
+				var outbound *Outbound
+				host, outbound = GetDNSLie(index)
+				if outbound.Protocol != 0 {
 					continue
 				}
-				if pface.Hint&(HINT_UDP|HINT_HTTP3) == 0 {
+				if outbound.Hint&(HINT_UDP|HINT_HTTP3) == 0 {
 					continue
 				}
-				if pface.Hint&(HINT_HTTP3) != 0 {
+				if outbound.Hint&(HINT_HTTP3) != 0 {
 					if GetQUICVersion(data[:n]) == 0 {
 						continue
 					}
 				}
-				_, ips := pface.NSLookup(host)
+				_, ips := outbound.NSLookup(host)
 				if ips == nil {
 					continue
 				}
@@ -627,7 +647,7 @@ func SocksUDPProxy(address string) {
 					continue
 				}
 
-				if pface.Hint&HINT_ZERO != 0 {
+				if outbound.Hint&HINT_ZERO != 0 {
 					zero_data := make([]byte, 8+rand.Intn(1024))
 					_, err = remoteConn.Write(zero_data)
 					if err != nil {
@@ -696,8 +716,8 @@ func Netcat(client net.Conn) {
 			case "host":
 				if cmdlen > 1 {
 					domain := cmd[1]
-					pface, _ := DefaultProfile.GetInterface(domain)
-					_, addrs := pface.NSLookup(domain)
+					outbound, _ := DefaultProfile.GetOutbound(domain)
+					_, addrs := outbound.NSLookup(domain)
 					for _, addr := range addrs {
 						client.Write([]byte(addr.String() + "\n"))
 					}
@@ -737,21 +757,21 @@ func Netcat(client net.Conn) {
 	}
 }
 
-func (pface *PhantomInterface) ProxyHandshake(conn net.Conn, synpacket *ConnectionInfo, host string, port int, header []byte) (net.Conn, error) {
+func (outbound *Outbound) ProxyHandshake(conn net.Conn, synpacket *ConnectionInfo, host string, port int, header []byte) (net.Conn, error) {
 	var err error
 	proxy_err := errors.New("invalid proxy")
 
-	hint := pface.Hint & HINT_MODIFY
+	hint := outbound.Hint & HINT_MODIFY
 	var proxy_seq uint32 = 0
-	switch pface.Protocol {
+	switch outbound.Protocol {
 	case DIRECT:
 	case REDIRECT:
 	case NAT64:
 	case HTTP:
 		{
 			header := fmt.Sprintf("CONNECT %s HTTP/1.1\r\n", net.JoinHostPort(host, strconv.Itoa(port)))
-			if pface.Authorization != "" {
-				header += fmt.Sprintf("Authorization: Basic %s\r\n", pface.Authorization)
+			if outbound.Authorization != "" {
+				header += fmt.Sprintf("Authorization: Basic %s\r\n", outbound.Authorization)
 			}
 			header += "\r\n"
 			request := []byte(header)
@@ -771,7 +791,7 @@ func (pface *PhantomInterface) ProxyHandshake(conn net.Conn, synpacket *Connecti
 				}
 
 				proxy_seq += uint32(n)
-				err = ModifyAndSendPacket(synpacket, fakepayload, hint, pface.TTL, 2)
+				err = ModifyAndSendPacket(synpacket, fakepayload, hint, outbound.TTL, 2)
 				if err != nil {
 					return conn, err
 				}
@@ -803,7 +823,7 @@ func (pface *PhantomInterface) ProxyHandshake(conn net.Conn, synpacket *Connecti
 		{
 			var b [264]byte
 			if synpacket != nil {
-				err := ModifyAndSendPacket(synpacket, b[:], hint, pface.TTL, 2)
+				err := ModifyAndSendPacket(synpacket, b[:], hint, outbound.TTL, 2)
 				if err != nil {
 					return conn, err
 				}
@@ -813,8 +833,8 @@ func (pface *PhantomInterface) ProxyHandshake(conn net.Conn, synpacket *Connecti
 			}
 			conn = tls.Client(conn, conf)
 			header := fmt.Sprintf("CONNECT %s HTTP/1.1\r\n", net.JoinHostPort(host, strconv.Itoa(port)))
-			if pface.Authorization != "" {
-				header += fmt.Sprintf("Authorization: Basic %s\r\n", pface.Authorization)
+			if outbound.Authorization != "" {
+				header += fmt.Sprintf("Authorization: Basic %s\r\n", outbound.Authorization)
 			}
 			header += "\r\n"
 			request := []byte(header)
@@ -832,7 +852,7 @@ func (pface *PhantomInterface) ProxyHandshake(conn net.Conn, synpacket *Connecti
 		{
 			var b [264]byte
 			if synpacket != nil {
-				err := ModifyAndSendPacket(synpacket, b[:], hint, pface.TTL, 2)
+				err := ModifyAndSendPacket(synpacket, b[:], hint, outbound.TTL, 2)
 				if err != nil {
 					return conn, err
 				}
@@ -871,7 +891,7 @@ func (pface *PhantomInterface) ProxyHandshake(conn net.Conn, synpacket *Connecti
 		{
 			var b [264]byte
 			if synpacket != nil {
-				err := ModifyAndSendPacket(synpacket, b[:], hint, pface.TTL, 2)
+				err := ModifyAndSendPacket(synpacket, b[:], hint, outbound.TTL, 2)
 				if err != nil {
 					return conn, err
 				}
@@ -891,8 +911,8 @@ func (pface *PhantomInterface) ProxyHandshake(conn net.Conn, synpacket *Connecti
 				return nil, proxy_err
 			}
 
-			if pface.DNS != "" {
-				_, ips := pface.NSLookup(host)
+			if outbound.DNS != "" {
+				_, ips := outbound.NSLookup(host)
 				if ips != nil {
 					ip := ips[rand.Intn(len(ips))]
 					ip4 := ip.To4()

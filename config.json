@@ -1,14 +1,14 @@
 {
     "profiles": ["default.conf"],
     "vaddrprefix": 6,
-    "services": [
+    "inbounds": [
         {
             "name": "Socks",
             "protocol": "socks",
             "address": "127.0.0.1:1080"
         }
     ],
-    "interfaces": [
+    "outbounds": [
         {
             "name": "default",
             "dns": "udp://8.8.8.8:53"

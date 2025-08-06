@@ -60,9 +60,6 @@ var ConnWait6 [65536]uint32
 var winDivertLock sync.Mutex
 var winDivert *godivert.WinDivertHandle
 
-func DevicePrint() {
-}
-
 func connectionMonitor(layer uint8) {
 	filter := "tcp.Syn"
 
@@ -443,7 +440,7 @@ func Redirect(dst string, to_port int, forward bool) {
 		dstfilter = fmt.Sprintf("ip.DstAddr=%s and tcp", dst)
 	}
 
-	logPrintln(1, dstfilter)
+	logPrintln(2, dstfilter)
 
 	filter := fmt.Sprintf("(outbound and %s) or (ip.SrcAddr>127.255.0.0 and ip.SrcAddr<127.255.255.255 and tcp.SrcPort=%s)", dstfilter, strconv.Itoa(to_port))
 
@@ -525,17 +522,17 @@ func Redirect(dst string, to_port int, forward bool) {
 
 func RedirectDNS() {
 	winDivertLock.Lock()
-	winDivert, err := godivert.WinDivertOpen("outbound and udp.DstPort=53", 0, 0, 0)
+	winDivertDNS, err := godivert.NewWinDivertHandle("outbound and udp.DstPort=53")
 	winDivertLock.Unlock()
 	if err != nil {
 		fmt.Printf("winDivert open failed: %v", err)
 		return
 	}
-	defer winDivert.Close()
+	defer winDivertDNS.Close()
 
 	rawbuf := make([]byte, 1500)
 	for {
-		packet, err := winDivert.Recv()
+		packet, err := winDivertDNS.Recv()
 		if err != nil {
 			logPrintln(1, err)
 			continue
@@ -557,9 +554,8 @@ func RedirectDNS() {
 			continue
 		}
 
-		pface, _ := DefaultProfile.GetInterface(qname)
-		if pface != nil {
-			logPrintln(1, qname, pface)
+		outbound, _ := DefaultProfile.GetOutbound(qname)
+		if outbound != nil && outbound != DefaultOutbound {
 			_, response := NSRequest(request, true)
 			udpsize := len(response) + 8
 
@@ -588,11 +584,11 @@ func RedirectDNS() {
 
 			packet.PacketLen = uint(packetsize)
 			packet.Raw = rawbuf[:packetsize]
-			packet.Addr.Data |= 0x1
-			packet.CalcNewChecksum(winDivert)
+			packet.Addr.Data = 0x1
+			packet.CalcNewChecksum(winDivertDNS)
 		}
 
-		_, err = winDivert.Send(packet)
+		_, err = winDivertDNS.Send(packet)
 		if err != nil {
 			logPrintln(1, err)
 			return

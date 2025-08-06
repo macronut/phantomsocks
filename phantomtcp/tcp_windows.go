@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func DialConnInfo(laddr, raddr *net.TCPAddr, server *PhantomInterface, payload []byte) (net.Conn, *ConnectionInfo, error) {
+func DialConnInfo(laddr, raddr *net.TCPAddr, server *Outbound, payload []byte) (net.Conn, *ConnectionInfo, error) {
 	var conn net.Conn
 	var err error
 

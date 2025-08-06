@@ -125,18 +125,18 @@ func StartService() {
 	}
 	conf.Close()
 
-	var ServiceConfig struct {
+	var ProxyConfig struct {
 		VirtualAddrPrefix int    `json:"vaddrprefix,omitempty"`
 		SystemProxy       string `json:"proxy,omitempty"`
 		HostsFile         string `json:"hosts,omitempty"`
 
-		Clients    []string               `json:"clients,omitempty"`
-		Profiles   []string               `json:"profiles,omitempty"`
-		Services   []ptcp.ServiceConfig   `json:"services,omitempty"`
-		Interfaces []ptcp.InterfaceConfig `json:"interfaces,omitempty"`
+		Clients   []string              `json:"clients,omitempty"`
+		Profiles  []string              `json:"profiles,omitempty"`
+		Inbounds  []ptcp.InboundConfig  `json:"inbounds,omitempty"`
+		Outbounds []ptcp.OutboundConfig `json:"outbounds,omitempty"`
 	}
 
-	err = json.Unmarshal(bytes, &ServiceConfig)
+	err = json.Unmarshal(bytes, &ProxyConfig)
 	if err != nil {
 		log.Panic(err)
 	}
@@ -147,9 +147,9 @@ func StartService() {
 
 	ptcp.LogLevel = LogLevel
 	ptcp.PassiveMode = PassiveMode
-	devices := ptcp.CreateInterfaces(ServiceConfig.Interfaces)
+	devices := ptcp.CreateOutbounds(ProxyConfig.Outbounds)
 
-	for _, filename := range ServiceConfig.Profiles {
+	for _, filename := range ProxyConfig.Profiles {
 		err := ptcp.LoadProfile(filename)
 		if err != nil {
 			if ptcp.LogLevel > 0 {
@@ -159,8 +159,8 @@ func StartService() {
 		}
 	}
 
-	if ServiceConfig.HostsFile != "" {
-		err := ptcp.LoadHosts(ServiceConfig.HostsFile)
+	if ProxyConfig.HostsFile != "" {
+		err := ptcp.LoadHosts(ProxyConfig.HostsFile)
 		if err != nil {
 			if ptcp.LogLevel > 0 {
 				log.Println(err)
@@ -169,26 +169,26 @@ func StartService() {
 		}
 	}
 
-	if len(ServiceConfig.Clients) > 0 {
+	if len(ProxyConfig.Clients) > 0 {
 		allowlist = make(map[string]bool)
-		list := ServiceConfig.Clients
+		list := ProxyConfig.Clients
 		for _, c := range list {
 			allowlist[c] = true
 		}
 	}
 
 	default_proxy := ""
-	for _, service := range ServiceConfig.Services {
-		switch service.Protocol {
+	for _, inbound := range ProxyConfig.Inbounds {
+		switch inbound.Protocol {
 		case "dns":
-			fmt.Println("DNS:", service.Address)
+			fmt.Println("DNS:", inbound.Address)
 			go func(addr string) {
 				err := ptcp.DNSServer(addr)
 				if err != nil {
 					fmt.Println("DNS:", err)
 				}
-			}(service.Address)
-			go ListenAndServe(service.Address, "", ptcp.DNSTCPServer)
+			}(inbound.Address)
+			go ListenAndServe(inbound.Address, "", ptcp.DNSTCPServer)
 		case "doh":
 			go func(addr string, certs []string) {
 				fmt.Println("DoH:", addr)
@@ -197,41 +197,42 @@ func StartService() {
 				if err != nil {
 					fmt.Println("DoH:", err)
 				}
-			}(service.Address, strings.Split(service.PrivateKey, ","))
+			}(inbound.Address, strings.Split(inbound.PrivateKey, ","))
 		case "http":
-			fmt.Println("HTTP:", service.Address)
-			go ListenAndServe(service.Address, service.PrivateKey, ptcp.HTTPProxy)
-			default_proxy = "HTTP " + service.Address
+			fmt.Println("HTTP:", inbound.Address)
+			go ListenAndServe(inbound.Address, inbound.PrivateKey, ptcp.HTTPProxy)
+			default_proxy = "HTTP " + inbound.Address
 		case "socks5":
 			fallthrough
 		case "socks":
-			fmt.Println("Socks:", service.Address)
-			go ListenAndServe(service.Address, service.PrivateKey, ptcp.SocksProxy)
-			go ptcp.SocksUDPProxy(service.Address)
-			default_proxy = strings.ToUpper(service.Protocol) + " " + service.Address
+			fmt.Println("Socks:", inbound.Address)
+			go ListenAndServe(inbound.Address, inbound.PrivateKey, ptcp.SocksProxy)
+			go ptcp.SocksUDPProxy(inbound.Address)
+			default_proxy = strings.ToUpper(inbound.Protocol) + " " + inbound.Address
 		case "redirect":
-			fmt.Println("Redirect:", service.Address)
-			go ListenAndServe(service.Address, service.PrivateKey, ptcp.RedirectProxy)
+			fmt.Println("Redirect:", inbound.Address)
+			go ptcp.RedirectTCP(inbound.Address)
+			go ptcp.RedirectUDP(inbound.Address)
 		case "tproxy":
-			fmt.Println("TProxy:", service.Address)
-			go ptcp.TProxyTCP(service.Address)
-			go ptcp.TProxyUDP(service.Address)
+			fmt.Println("TProxy:", inbound.Address)
+			go ptcp.TProxyTCP(inbound.Address)
+			go ptcp.TProxyUDP(inbound.Address)
 		case "tcp":
-			fmt.Println("TCP:", service.Address, service.Peers[0].Endpoint)
+			fmt.Println("TCP:", inbound.Address, inbound.Peers[0].Endpoint)
 			var l net.Listener
-			keys := strings.Split(service.PrivateKey, ",")
+			keys := strings.Split(inbound.PrivateKey, ",")
 			if len(keys) == 2 {
 				var cer tls.Certificate
 				cer, err = tls.LoadX509KeyPair(keys[0], keys[1])
 				if err == nil {
 					config := &tls.Config{Certificates: []tls.Certificate{cer}}
-					l, err = tls.Listen("tcp", service.Address, config)
+					l, err = tls.Listen("tcp", inbound.Address, config)
 				}
 			} else {
-				if service.Address[0] == '[' {
-					l, err = net.Listen("tcp6", service.Address)
+				if inbound.Address[0] == '[' {
+					l, err = net.Listen("tcp6", inbound.Address)
 				} else {
-					l, err = net.Listen("tcp", service.Address)
+					l, err = net.Listen("tcp", inbound.Address)
 				}
 			}
 			if err != nil {
@@ -239,31 +240,31 @@ func StartService() {
 				continue
 			}
 
-			go ptcp.TCPMapping(l, service.Peers)
+			go ptcp.TCPMapping(l, inbound.Peers)
 		case "udp":
-			go ptcp.UDPMapping(service.Address, service.Peers[0].Endpoint)
+			go ptcp.UDPMapping(inbound.Address, inbound.Peers[0].Endpoint)
 		case "pac":
 			if default_proxy != "" {
-				go PACServer(service.Address, "", default_proxy)
+				go PACServer(inbound.Address, "", default_proxy)
 			}
 		case "reverse":
-			fmt.Println("Reverse:", service.Address)
-			go ListenAndServe(service.Address, service.PrivateKey, ptcp.SNIProxy)
-			go ptcp.QUICProxy(service.Address)
+			fmt.Println("Reverse:", inbound.Address)
+			go ListenAndServe(inbound.Address, inbound.PrivateKey, ptcp.SNIProxy)
+			go ptcp.QUICProxy(inbound.Address)
 		}
 	}
 
-	if ServiceConfig.SystemProxy != "" {
+	if ProxyConfig.SystemProxy != "" {
 		for _, dev := range devices {
-			err := proxy.SetProxy(dev, ServiceConfig.SystemProxy, true)
+			err := proxy.SetProxy(dev, ProxyConfig.SystemProxy, true)
 			if err != nil {
 				fmt.Println(err)
 			}
 		}
 	}
 
-	if ServiceConfig.VirtualAddrPrefix != 0 {
-		ptcp.VirtualAddrPrefix = byte(ServiceConfig.VirtualAddrPrefix)
+	if ProxyConfig.VirtualAddrPrefix != 0 {
+		ptcp.VirtualAddrPrefix = byte(ProxyConfig.VirtualAddrPrefix)
 	}
 
 	c := make(chan os.Signal, 1)
@@ -271,9 +272,9 @@ func StartService() {
 	s := <-c
 	fmt.Println(s)
 
-	if ServiceConfig.SystemProxy != "" {
+	if ProxyConfig.SystemProxy != "" {
 		for _, dev := range devices {
-			err := proxy.SetProxy(dev, ServiceConfig.SystemProxy, false)
+			err := proxy.SetProxy(dev, ProxyConfig.SystemProxy, false)
 			if err != nil {
 				fmt.Println(err)
 			}

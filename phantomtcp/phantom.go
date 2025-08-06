@@ -19,7 +19,7 @@ import (
 	"strings"
 )
 
-type ServiceConfig struct {
+type InboundConfig struct {
 	Name       string `json:"name,omitempty"`
 	Device     string `json:"device,omitempty"`
 	MTU        int    `json:"mtu,omitempty"`
@@ -32,7 +32,7 @@ type ServiceConfig struct {
 	Peers []Peer `json:"peers,omitempty"`
 }
 
-type InterfaceConfig struct {
+type OutboundConfig struct {
 	Name   string `json:"name,omitempty"`
 	Device string `json:"device,omitempty"`
 	DNS    string `json:"dns,omitempty"`
@@ -72,7 +72,7 @@ const (
 	SOCKS5   = 0x6
 )
 
-type PhantomInterface struct {
+type Outbound struct {
 	Device string
 	DNS    string
 	Hint   uint32
@@ -85,29 +85,29 @@ type PhantomInterface struct {
 	Authorization string
 
 	Timeout  uint16
-	Fallback *PhantomInterface
+	Fallback *Outbound
 }
 
 type IPv4Range struct {
 	Start     uint32
 	End       uint32
-	Interface *PhantomInterface
+	Interface *Outbound
 }
 
 type IPv6Range struct {
 	Start     uint64
 	End       uint64
-	Interface *PhantomInterface
+	Interface *Outbound
 }
 
 type PhantomProfile struct {
-	DomainMap  map[string]*PhantomInterface
+	DomainMap  map[string]*Outbound
 	IPv4Ranges []IPv4Range
 	IPv6Ranges []IPv6Range
 }
 
 var DefaultProfile *PhantomProfile = nil
-var DefaultInterface *PhantomInterface = nil
+var DefaultOutbound *Outbound = nil
 
 var SubdomainDepth = 2
 var LogLevel = 0
@@ -166,7 +166,7 @@ func logPrintln(level int, v ...interface{}) {
 	}
 }
 
-func (profile *PhantomProfile) GetInterface(name string) (*PhantomInterface, int) {
+func (profile *PhantomProfile) GetOutbound(name string) (*Outbound, int) {
 	config, ok := profile.DomainMap[name]
 	if ok {
 		return config, 0
@@ -186,10 +186,10 @@ func (profile *PhantomProfile) GetInterface(name string) (*PhantomInterface, int
 		offset++
 	}
 
-	return DefaultInterface, 0
+	return DefaultOutbound, 0
 }
 
-func (profile *PhantomProfile) GetInterfaceByIP(ip net.IP) *PhantomInterface {
+func (profile *PhantomProfile) GetOutboundByIP(ip net.IP) *Outbound {
 	ip4 := ip.To4()
 	if ip4 != nil {
 		ip := binary.BigEndian.Uint32(ip4)
@@ -211,17 +211,17 @@ func (profile *PhantomProfile) GetInterfaceByIP(ip net.IP) *PhantomInterface {
 		}
 	}
 
-	return DefaultInterface
+	return DefaultOutbound
 }
 
 /*
-func (profile *PhantomProfile) GetInterface(name string) *PhantomInterface {
+func (profile *PhantomProfile) GetOutbound(name string) *Outbound {
 	config, ok := profile.DomainMap[name]
 	if ok {
 		return config
 	}
 
-	return DefaultInterface
+	return DefaultOutbound
 }
 */
 
@@ -491,8 +491,8 @@ func HttpMove(conn net.Conn, host string, b []byte) bool {
 	return true
 }
 
-func (pface *PhantomInterface) DialStrip(host string, fronting string) (*tls.Conn, error) {
-	addr, err := pface.ResolveTCPAddr(host, 443)
+func (outbound *Outbound) DialStrip(host string, fronting string) (*tls.Conn, error) {
+	addr, err := outbound.ResolveTCPAddr(host, 443)
 	if err != nil {
 		return nil, err
 	}
@@ -521,7 +521,7 @@ func LoadProfile(filename string) error {
 
 	br := bufio.NewReader(conf)
 
-	var CurrentInterface *PhantomInterface = DefaultInterface
+	var CurrentInterface *Outbound = DefaultOutbound
 
 	for {
 		line, _, err := br.ReadLine()
@@ -636,9 +636,9 @@ func LoadProfile(filename string) error {
 					}
 				} else {
 					if keys[0][0] == '[' {
-						pface, ok := InterfaceMap[keys[0][1:len(keys[0])-1]]
+						outbound, ok := OutboundsMap[keys[0][1:len(keys[0])-1]]
 						if ok {
-							CurrentInterface = pface
+							CurrentInterface = outbound
 							logPrintln(1, keys[0], CurrentInterface)
 						} else {
 							logPrintln(1, keys[0], "invalid interface")
@@ -748,10 +748,10 @@ func LoadHosts(filename string) error {
 				offset++
 			}
 
-			pface, _ := DefaultProfile.GetInterface(name)
-			if ok && pface.Hint != 0 {
-				records.Index = AddDNSLie(name, pface)
-				records.ALPN = pface.Hint & HINT_DNS
+			outbound, _ := DefaultProfile.GetOutbound(name)
+			if ok && outbound.Hint != 0 {
+				records.Index = AddDNSLie(name, outbound)
+				records.ALPN = outbound.Hint & HINT_DNS
 			}
 			ip := net.ParseIP(k[0])
 			if ip == nil {
@@ -802,11 +802,11 @@ function FindProxyForURL(url, host) {
 	return fmt.Sprintf(Context, address, rule, SubdomainDepth)
 }
 
-var InterfaceMap map[string]*PhantomInterface
+var OutboundsMap map[string]*Outbound
 
-func CreateInterfaces(Interfaces []InterfaceConfig) []string {
-	DefaultProfile = &PhantomProfile{DomainMap: make(map[string]*PhantomInterface), IPv4Ranges: nil, IPv6Ranges: nil}
-	InterfaceMap = make(map[string]*PhantomInterface)
+func CreateOutbounds(Outbounds []OutboundConfig) []string {
+	DefaultProfile = &PhantomProfile{DomainMap: make(map[string]*Outbound), IPv4Ranges: nil, IPv6Ranges: nil}
+	OutboundsMap = make(map[string]*Outbound)
 
 	contains := func(a []string, x string) bool {
 		for _, n := range a {
@@ -818,7 +818,7 @@ func CreateInterfaces(Interfaces []InterfaceConfig) []string {
 	}
 
 	var devices []string
-	for _, config := range Interfaces {
+	for _, config := range Outbounds {
 		var Hint uint32 = HINT_NONE
 		for _, h := range strings.Split(config.Hint, ",") {
 			if h != "" {
@@ -831,55 +831,55 @@ func CreateInterfaces(Interfaces []InterfaceConfig) []string {
 			}
 		}
 
-		pface := new(PhantomInterface)
-		pface.Device = config.Device
-		pface.DNS = config.DNS
-		pface.Hint = Hint
-		pface.MTU = uint16(config.MTU)
-		pface.TTL = byte(config.TTL)
-		pface.MaxTTL = byte(config.MaxTTL)
-		pface.Address = config.Address
-		pface.Timeout = 65535
-		pface.Fallback = nil
+		outbound := new(Outbound)
+		outbound.Device = config.Device
+		outbound.DNS = config.DNS
+		outbound.Hint = Hint
+		outbound.MTU = uint16(config.MTU)
+		outbound.TTL = byte(config.TTL)
+		outbound.MaxTTL = byte(config.MaxTTL)
+		outbound.Address = config.Address
+		outbound.Timeout = 65535
+		outbound.Fallback = nil
 
 		if config.Fallback != "" {
-			fallback, ok := InterfaceMap[config.Fallback]
+			fallback, ok := OutboundsMap[config.Fallback]
 			if ok {
-				pface.Fallback = fallback
+				outbound.Fallback = fallback
 			}
 		}
 
 		if config.Timeout > 0 {
-			pface.Timeout = uint16(config.Timeout)
+			outbound.Timeout = uint16(config.Timeout)
 		}
 
 		switch config.Protocol {
 		case "direct":
-			pface.Protocol = DIRECT
+			outbound.Protocol = DIRECT
 		case "redirect":
-			pface.Protocol = REDIRECT
+			outbound.Protocol = REDIRECT
 		case "nat64":
-			pface.Protocol = NAT64
+			outbound.Protocol = NAT64
 		case "http":
-			pface.Protocol = HTTP
+			outbound.Protocol = HTTP
 			Authorization := []byte(fmt.Sprintf("%s:%s", config.PublicKey, config.PrivateKey))
-			pface.Authorization = fmt.Sprintf("Basic %s", base64.StdEncoding.EncodeToString(Authorization))
+			outbound.Authorization = fmt.Sprintf("Basic %s", base64.StdEncoding.EncodeToString(Authorization))
 		case "https":
-			pface.Protocol = HTTPS
+			outbound.Protocol = HTTPS
 			Authorization := []byte(fmt.Sprintf("%s:%s", config.PublicKey, config.PrivateKey))
-			pface.Authorization = fmt.Sprintf("Basic %s", base64.StdEncoding.EncodeToString(Authorization))
+			outbound.Authorization = fmt.Sprintf("Basic %s", base64.StdEncoding.EncodeToString(Authorization))
 		case "socks4":
-			pface.Protocol = SOCKS4
+			outbound.Protocol = SOCKS4
 		case "socks5":
-			pface.Protocol = SOCKS5
+			outbound.Protocol = SOCKS5
 		case "socks":
-			pface.Protocol = SOCKS5
+			outbound.Protocol = SOCKS5
 		}
 
-		InterfaceMap[config.Name] = pface
+		OutboundsMap[config.Name] = outbound
 
 		if Hint&HINT_FAKE != 0 {
-			if runtime.GOOS == "linux" && pface.Device == "" {
+			if runtime.GOOS == "linux" && outbound.Device == "" {
 				cmd := exec.Command("ip", "r")
 				out, err := cmd.CombinedOutput()
 				if err != nil {
@@ -889,45 +889,45 @@ func CreateInterfaces(Interfaces []InterfaceConfig) []string {
 				for _, line := range strings.Split(string(out), "\n") {
 					route := strings.Fields(line)
 					if len(route) > 4 && route[0] == "default" {
-						pface.Device = route[4]
+						outbound.Device = route[4]
 						break
 					}
 				}
 			}
 
-			_, ok := InterfaceMap[pface.Device]
-			if !ok && !contains(devices, pface.Device) {
-				devices = append(devices, pface.Device)
+			_, ok := OutboundsMap[outbound.Device]
+			if !ok && !contains(devices, outbound.Device) {
+				devices = append(devices, outbound.Device)
 			}
 		}
 	}
 
-	default_interface, ok := InterfaceMap["default"]
+	default_outbound, ok := OutboundsMap["default"]
 	if ok {
-		DefaultInterface = default_interface
+		DefaultOutbound = default_outbound
 	} else {
-		logPrintln(1, "no default interface")
+		logPrintln(1, "no default outbound")
 	}
 
 	go ConnectionMonitor(devices)
 	return devices
 }
 
-func (config *ServiceConfig) StartService() {
+func (inbound *InboundConfig) StartService() {
 }
 
-func (config *InterfaceConfig) StartClient() error {
+func (outbound *OutboundConfig) StartClient() error {
 	return nil
 }
 
-func (pface *PhantomInterface) Upgrade(conn net.Conn, host string, port int, b []byte) (net.Conn, error) {
+func (outbound *Outbound) Upgrade(conn net.Conn, host string, port int, b []byte) (net.Conn, error) {
 	return nil, nil
 }
 
-func (pface *PhantomInterface) DialTCP(address *net.TCPAddr) (net.Conn, error) {
+func (outbound *Outbound) DialTCP(address *net.TCPAddr) (net.Conn, error) {
 	return nil, nil
 }
 
-func (pface *PhantomInterface) DialUDP(address *net.UDPAddr) (net.Conn, error) {
+func (outbound *Outbound) DialUDP(address *net.UDPAddr) (net.Conn, error) {
 	return nil, nil
 }

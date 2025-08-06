@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"runtime"
 	"time"
 
 	"github.com/google/gopacket"
@@ -56,26 +57,35 @@ var ConnWait4 [65536]uint32
 var ConnWait6 [65536]uint32
 var pcapHandle *pcap.Handle
 
-func DevicePrint() {
+func FindDev(name string) string {
 	devices, err := pcap.FindAllDevs()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	fmt.Println("Devices found:")
+	Addr4, err := GetLocalTCPAddr(name, false)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println()
 	for _, device := range devices {
-		fmt.Println("\nName: ", device.Name)
-		fmt.Println("Description: ", device.Description)
-		fmt.Println("Devices addresses: ", device.Description)
 		for _, address := range device.Addresses {
-			fmt.Println("- IP address: ", address.IP)
-			fmt.Println("- Subnet mask: ", address.Netmask)
+			if Addr4.IP.Equal(address.IP) {
+				fmt.Println("Devices found: ", device.Name)
+				return device.Name
+			}
 		}
 	}
+
+	return ""
 }
 
 func connectionMonitor(device string) {
-	fmt.Printf("Device: %v\n", device)
+	fmt.Printf("Device: %v", device)
+	if runtime.GOOS == "windows" {
+		device = FindDev(device)
+	}
 
 	snapLen := int32(65535)
 
@@ -305,11 +315,6 @@ func connectionMonitor(device string) {
 }
 
 func ConnectionMonitor(devices []string) bool {
-	if devices == nil {
-		DevicePrint()
-		return false
-	}
-
 	for i := 0; i < 65536; i++ {
 		ConnInfo4[i] = make(chan *ConnectionInfo)
 		ConnInfo6[i] = make(chan *ConnectionInfo)

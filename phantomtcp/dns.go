@@ -37,7 +37,7 @@ type DNSRecords struct {
 
 type DNSLie struct {
 	Name      string
-	Interface *PhantomInterface
+	Interface *Outbound
 }
 
 var DNSMinTTL uint32 = 0
@@ -56,11 +56,11 @@ func TCPlookup(request []byte, address string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	pface := DefaultProfile.GetInterfaceByIP(raddr.IP)
+	outbound := DefaultProfile.GetOutboundByIP(raddr.IP)
 
-	if pface != nil {
+	if outbound != nil {
 		host, port := splitHostPort(address)
-		conn, _, err = pface.dial(host, port, data[:len(request)+2], 0, 0)
+		conn, _, err = outbound.dial(host, port, data[:len(request)+2], 0, 0)
 	} else {
 		conn, err = net.DialTimeout("tcp", address, time.Second*5)
 		if err == nil {
@@ -333,7 +333,7 @@ func TFOlookup(request []byte, address string) ([]byte, error) {
 	}
 	conn, _, err = DialConnInfo(
 		nil, addr,
-		&PhantomInterface{
+		&Outbound{
 			Hint: HINT_TFO,
 			TTL:  1,
 		},
@@ -969,8 +969,8 @@ func PackRequest(name string, qtype uint16, id uint16, ecs string, qtype2 uint16
 	} else {
 		binary.BigEndian.PutUint16(Request[4:], 1) //QDCount
 	}
-	binary.BigEndian.PutUint16(Request[6:], 0)      //ANCount
-	binary.BigEndian.PutUint16(Request[8:], 0)      //NSCount
+	binary.BigEndian.PutUint16(Request[6:], 0) //ANCount
+	binary.BigEndian.PutUint16(Request[8:], 0) //NSCount
 	if ecs != "" {
 		binary.BigEndian.PutUint16(Request[10:], 1) //ARCount
 	} else {
@@ -1074,23 +1074,23 @@ func StoreDNSCache(qname string, records *DNSRecords) {
 	DNSCache[qname] = records
 }
 
-func AddDNSLie(name string, pface *PhantomInterface) uint32 {
+func AddDNSLie(name string, outbound *Outbound) uint32 {
 	NoseLock.Lock()
 	Index := uint32(len(Nose))
-	Nose = append(Nose, DNSLie{name, pface})
+	Nose = append(Nose, DNSLie{name, outbound})
 	NoseLock.Unlock()
 	return Index
 }
 
-func GetDNSLie(index int) (string, *PhantomInterface) {
+func GetDNSLie(index int) (string, *Outbound) {
 	NoseLock.Lock()
 	lie := Nose[index]
 	NoseLock.Unlock()
 	return lie.Name, lie.Interface
 }
 
-func (pface *PhantomInterface) NSLookup(name string) (uint32, []net.IP) {
-	hint := pface.Hint
+func (outbound *Outbound) NSLookup(name string) (uint32, []net.IP) {
+	hint := outbound.Hint
 	var qtype uint16 = 1
 	if hint&HINT_IPV6 != 0 {
 		qtype = 28
@@ -1137,7 +1137,7 @@ func (pface *PhantomInterface) NSLookup(name string) (uint32, []net.IP) {
 	var err error
 
 	var options ServerOptions
-	u, err := url.Parse(pface.DNS)
+	u, err := url.Parse(outbound.DNS)
 	if err != nil {
 		logPrintln(1, err)
 		return 0, nil
@@ -1169,7 +1169,7 @@ func (pface *PhantomInterface) NSLookup(name string) (uint32, []net.IP) {
 			request = PackRequest(_name, qtype, uint16(0), options.ECS, options.QType2)
 			response, err = TFOlookup(request, u.Host)
 		default:
-			records.Index = AddDNSLie(name, pface)
+			records.Index = AddDNSLie(name, outbound)
 			records.ALPN = hint
 			return records.Index, nil
 		}
@@ -1180,7 +1180,7 @@ func (pface *PhantomInterface) NSLookup(name string) (uint32, []net.IP) {
 	}
 
 	if (hint&HINT_MODIFY != 0) && records.Index == 0 {
-		records.Index = AddDNSLie(name, pface)
+		records.Index = AddDNSLie(name, outbound)
 		records.ALPN = hint & HINT_DNS
 	}
 
@@ -1230,7 +1230,7 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 		return 0, nil
 	}
 
-	var pface *PhantomInterface
+	var outbound *Outbound
 	var records *DNSRecords
 	if cache {
 		records = LoadDNSCache(name)
@@ -1239,7 +1239,7 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 			StoreDNSCache(name, records)
 
 			var offset int
-			pface, offset = DefaultProfile.GetInterface(name)
+			outbound, offset = DefaultProfile.GetOutbound(name)
 			top := LoadDNSCache(name[offset:])
 			if top != nil {
 				*records = *top
@@ -1279,23 +1279,23 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 		IsUnknownType = true
 	}
 
-	if pface == nil {
-		pface, _ = DefaultProfile.GetInterface(name)
+	if outbound == nil {
+		outbound, _ = DefaultProfile.GetOutbound(name)
 	}
 
-	if pface != nil {
-		records.ALPN = pface.Hint & HINT_DNS
-		logPrintln(2, "request:", name, qtype, pface.DNS, pface.Protocol)
+	if outbound != nil {
+		records.ALPN = outbound.Hint & HINT_DNS
+		logPrintln(2, "request:", name, qtype, outbound.DNS, outbound.Protocol)
 	} else {
 		logPrintln(4, "request:", name, qtype, "no answer")
 		return 0, records.BuildResponse(request, qtype, 3600)
 	}
 
-	UseVaddr := (pface.Hint&HINT_MODIFY) != 0 || pface.Protocol != 0
+	UseVaddr := (outbound.Hint&HINT_MODIFY) != 0 || outbound.Protocol != 0
 	if UseVaddr {
-		if pface.DNS == "" {
+		if outbound.DNS == "" {
 			if records.Index == 0 {
-				records.Index = AddDNSLie(name, pface)
+				records.Index = AddDNSLie(name, outbound)
 			}
 			return records.Index, records.BuildResponse(request, qtype, 3600)
 		} else if IsUnknownType {
@@ -1303,7 +1303,7 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 		}
 	}
 
-	u, err := url.Parse(pface.DNS)
+	u, err := url.Parse(outbound.DNS)
 	if err != nil {
 		logPrintln(1, err)
 		return 0, nil
@@ -1391,7 +1391,7 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 	}
 
 	if UseVaddr && (records.Index == 0) {
-		records.Index = AddDNSLie(name, pface)
+		records.Index = AddDNSLie(name, outbound)
 
 		if options.Output != "" {
 			f, err := os.OpenFile(options.Output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
@@ -1423,13 +1423,13 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 	return records.Index, records.BuildResponse(request, qtype, 0)
 }
 
-func (pface *PhantomInterface) ResolveTCPAddr(host string, port int) (*net.TCPAddr, error) {
+func (outbound *Outbound) ResolveTCPAddr(host string, port int) (*net.TCPAddr, error) {
 	ip := net.ParseIP(host)
 	if ip != nil {
 		return &net.TCPAddr{IP: ip, Port: port}, nil
 	}
 
-	_, addrs := pface.NSLookup(host)
+	_, addrs := outbound.NSLookup(host)
 	if len(addrs) == 0 {
 		return nil, errors.New("no such host")
 	}
@@ -1437,7 +1437,7 @@ func (pface *PhantomInterface) ResolveTCPAddr(host string, port int) (*net.TCPAd
 	return &net.TCPAddr{IP: addrs[rand.Intn(len(addrs))], Port: port}, nil
 }
 
-func (pface *PhantomInterface) ResolveTCPAddrs(host string, port int) ([]*net.TCPAddr, error) {
+func (outbound *Outbound) ResolveTCPAddrs(host string, port int) ([]*net.TCPAddr, error) {
 	ip := net.ParseIP(host)
 	if ip != nil {
 		tcpAddrs := make([]*net.TCPAddr, 1)
@@ -1445,7 +1445,7 @@ func (pface *PhantomInterface) ResolveTCPAddrs(host string, port int) ([]*net.TC
 		return tcpAddrs, nil
 	}
 
-	_, addrs := pface.NSLookup(host)
+	_, addrs := outbound.NSLookup(host)
 	if len(addrs) == 0 {
 		return nil, errors.New("no such host")
 	}

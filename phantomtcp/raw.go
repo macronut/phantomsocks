@@ -51,9 +51,6 @@ var HintMap = map[string]uint32{
 	"zero":       HINT_ZERO,
 }
 
-func DevicePrint() {
-}
-
 func connectionMonitor(device string, ipv6 bool) {
 	localaddr, err := GetLocalTCPAddr(device, ipv6)
 	if err != nil {
@@ -253,11 +250,6 @@ func ICMPMonitor(device string, ipv6 bool) {
 }
 
 func ConnectionMonitor(devices []string) bool {
-	if devices == nil {
-		DevicePrint()
-		return false
-	}
-
 	if PassiveMode {
 		for i := 0; i < len(devices); i++ {
 			go ICMPMonitor(devices[i], false)
