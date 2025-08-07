@@ -24,7 +24,7 @@ Usage of ./phantomsocks:
     "vaddrprefix": 6,
     "proxy": "socks://address:port",
     "profiles": ["1.conf", "2.conf", "3.conf"],
-    "services": [
+    "inbounds": [
         {
             "name": "dns",
             "protocol": "dns",
@@ -43,10 +43,10 @@ Usage of ./phantomsocks:
         {
             "name": "tproxy",
             "protocol": "tproxy",
-            "address": "0.0.0.0:6"
+            "address": "0.0.0.0:7"
         }
     ],
-    "interfaces": [
+    "outbounds": [
         {
             "name": "default",
             "dns": "udp://8.8.8.8:53"
@@ -88,7 +88,7 @@ Usage of ./phantomsocks:
 Windows:
 config.json:
     "proxy" :"socks://127.0.0.1:1080/?dns=127.0.0.1",
-    "services": [
+    "inbounds": [
         {
             "name": "DNS",
             "protocol": "dns",
@@ -104,7 +104,7 @@ config.json:
 macOS:
 config.json:
     "proxy": "socks://127.0.0.1:1080",
-    "services": [
+    "inbounds": [
         {
             "name": "Socks",
             "protocol": "socks",
@@ -118,7 +118,7 @@ Linux:
 iptables -t nat -A OUTPUT -d 6.0.0.0/8 -p tcp -j REDIRECT --to-port 6
 config.json:
     "vaddrprefix": 6,
-    "services": [
+    "inbounds": [
         {
             "name": "DNS",
             "protocol": "dns",
@@ -134,8 +134,8 @@ config.json:
 Windows(windivert):
 config.json:
     "vaddrprefix": 6,
-    "proxy": "redirect://0.0.0.0:6",
-    "services": [
+    "proxy": "redirect://6.0.0.0:6",
+    "inbounds": [
         {
             "name": "Redirect",
             "protocol": "redirect",
@@ -143,7 +143,19 @@ config.json:
         }
     ]
 ```
-
+### Local Redirect (unsafe):
+```
+config.json:
+    "vaddrprefix": 127,
+    "proxy": "dns://127.0.0.1/?if=Ethernet",
+    "inbounds": [
+        {
+            "name": "Redirect",
+            "protocol": "redirect",
+            "address": "0.0.0.0:443"
+        }
+    ]
+```
 ### Rules
 ```
   [default]         #domains below will use the config of this interface
