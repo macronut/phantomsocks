@@ -560,7 +560,6 @@ func (records *DNSRecords) GetAnswers(response []byte, options ServerOptions) {
 				if SvcParamEnd > responseLen {
 					break
 				}
-				records.ALPN |= HINT_ALPN
 				switch SvcParamKey {
 				case 1:
 					for offset+1 < SvcParamEnd {
@@ -969,8 +968,8 @@ func PackRequest(name string, qtype uint16, id uint16, ecs string, qtype2 uint16
 	} else {
 		binary.BigEndian.PutUint16(Request[4:], 1) //QDCount
 	}
-	binary.BigEndian.PutUint16(Request[6:], 0) //ANCount
-	binary.BigEndian.PutUint16(Request[8:], 0) //NSCount
+	binary.BigEndian.PutUint16(Request[6:], 0)      //ANCount
+	binary.BigEndian.PutUint16(Request[8:], 0)      //NSCount
 	if ecs != "" {
 		binary.BigEndian.PutUint16(Request[10:], 1) //ARCount
 	} else {
@@ -1179,7 +1178,7 @@ func (outbound *Outbound) NSLookup(name string) (uint32, []net.IP) {
 		return 0, nil
 	}
 
-	if (hint&HINT_MODIFY != 0) && records.Index == 0 {
+	if (hint&HINT_FAKEIP != 0) && records.Index == 0 {
 		records.Index = AddDNSLie(name, outbound)
 		records.ALPN = hint & HINT_DNS
 	}
@@ -1272,7 +1271,7 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 			return records.Index, records.BuildResponse(request, qtype, 60)
 		}
 	case 65:
-		if records.ALPN&(HINT_ALPN|HINT_HTTPS|HINT_HTTP2|HINT_HTTP3) != 0 {
+		if records.ALPN&(HINT_HTTPS|HINT_HTTP2|HINT_HTTP3) != 0 {
 			return records.Index, records.BuildResponse(request, qtype, 3600)
 		}
 	default:
@@ -1291,7 +1290,7 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 		return 0, records.BuildResponse(request, qtype, 3600)
 	}
 
-	UseVaddr := (outbound.Hint&HINT_MODIFY) != 0 || outbound.Protocol != 0
+	UseVaddr := (outbound.Hint&HINT_FAKEIP) != 0
 	if UseVaddr {
 		if outbound.DNS == "" {
 			if records.Index == 0 {

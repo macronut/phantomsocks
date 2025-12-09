@@ -117,17 +117,18 @@ var PassiveMode = false
 const (
 	HINT_NONE = 0x0
 
-	HINT_ALPN  = 0x1 << 1
-	HINT_HTTPS = 0x1 << 2
-	HINT_HTTP2 = 0x1 << 3
-	HINT_HTTP3 = 0x1 << 4
+	HINT_HTTPS = 0x1 << 0
+	HINT_HTTP2 = 0x1 << 1
+	HINT_HTTP3 = 0x1 << 2
 
-	HINT_IPV4 = 0x1 << 5
-	HINT_IPV6 = 0x1 << 6
+	HINT_IPV4   = 0x1 << 3
+	HINT_IPV6   = 0x1 << 4
+	HINT_FAKEIP = 0x1 << 5
 
-	HINT_MOVE     = 0x1 << 7
-	HINT_STRIP    = 0x1 << 8
-	HINT_FRONTING = 0x1 << 9
+	HINT_MOVE     = 0x1 << 6
+	HINT_STRIP    = 0x1 << 7
+	HINT_FRONTING = 0x1 << 8
+	HINT_TLS1_3   = 0x1 << 9
 
 	HINT_TTL   = 0x1 << 10
 	HINT_WMD5  = 0x1 << 11
@@ -136,17 +137,18 @@ const (
 	HINT_WCSUM = 0x1 << 14
 	HINT_WSEQ  = 0x1 << 15
 	HINT_WTIME = 0x1 << 16
+	HINT_OOB   = 0x1 << 17
 
-	HINT_TFO   = 0x1 << 17
-	HINT_UDP   = 0x1 << 18
-	HINT_NOTCP = 0x1 << 19
-	HINT_DELAY = 0x1 << 20
+	HINT_TFO   = 0x1 << 18
+	HINT_UDP   = 0x1 << 19
+	HINT_NOTCP = 0x1 << 20
+	HINT_DELAY = 0x1 << 21
 
-	HINT_MODE2     = 0x1 << 21
-	HINT_DF        = 0x1 << 22
-	HINT_SAT       = 0x1 << 23
-	HINT_RAND      = 0x1 << 24
-	HINT_TCPFRAG   = 0x1 << 25
+	HINT_MODE2     = 0x1 << 22
+	HINT_DF        = 0x1 << 23
+	HINT_SAT       = 0x1 << 24
+	HINT_RAND      = 0x1 << 25
+	HINT_TCPFRAG   = 0x1 << 26
 	HINT_TLSFRAG   = 0x1 << 27
 	HINT_HTFO      = 0x1 << 28
 	HINT_KEEPALIVE = 0x1 << 29
@@ -154,9 +156,9 @@ const (
 	HINT_ZERO      = 0x1 << 31
 )
 
-const HINT_DNS = HINT_ALPN | HINT_HTTPS | HINT_HTTP2 | HINT_HTTP3 | HINT_IPV4 | HINT_IPV6
+const HINT_DNS = HINT_HTTPS | HINT_HTTP2 | HINT_HTTP3 | HINT_IPV4 | HINT_IPV6
 const HINT_FAKE = HINT_TTL | HINT_WMD5 | HINT_NACK | HINT_WACK | HINT_WCSUM | HINT_WSEQ | HINT_WTIME | HINT_TFO | HINT_HTFO
-const HINT_MODIFY = HINT_FAKE | HINT_TCPFRAG | HINT_TLSFRAG | HINT_MODE2 | HINT_MOVE | HINT_STRIP | HINT_FRONTING
+const HINT_MODIFY = HINT_FAKE | HINT_OOB | HINT_TCPFRAG | HINT_TLSFRAG | HINT_MODE2 | HINT_MOVE | HINT_STRIP | HINT_FRONTING
 
 var Logger *log.Logger
 
@@ -321,6 +323,99 @@ func GetSNI(header []byte) (offset int, length int, ech bool) {
 		offset += int(ExtensionLength)
 	}
 	return 0, 0, ech
+}
+
+func GetTLSVersion(header []byte) uint16 {
+	headerLen := len(header)
+	offset := 11 + 32
+	if offset+1 > headerLen {
+		return 0
+	}
+	if header[0] != 0x16 {
+		return 0
+	}
+	Version := binary.BigEndian.Uint16(header[1:3])
+	if (Version & 0xFFF8) != 0x0300 {
+		return 0
+	}
+	Length := binary.BigEndian.Uint16(header[3:5])
+	if headerLen <= int(Length)-5 {
+		return Version
+	}
+	HandshakeType := header[5]
+	if HandshakeType != 1 {
+		return Version
+	}
+	HandshakeLength := int(binary.BigEndian.Uint32(header[5:9]) & 0xFFFFFF)
+	if HandshakeLength > headerLen-9 {
+		return Version
+	}
+	Version = binary.BigEndian.Uint16(header[9:11])
+	if (Version & 0xFFF8) != 0x0300 {
+		return Version
+	}
+	SessionIDLength := header[offset]
+	offset += 1 + int(SessionIDLength)
+	if offset+2 > headerLen {
+		return Version
+	}
+	CipherSuitersLength := binary.BigEndian.Uint16(header[offset : offset+2])
+	offset += 2 + int(CipherSuitersLength)
+	if offset >= headerLen {
+		return Version
+	}
+	CompressionMethodsLenght := header[offset]
+	offset += 1 + int(CompressionMethodsLenght)
+	if offset+4 > headerLen {
+		return Version
+	}
+	ExtensionsLength := binary.BigEndian.Uint16(header[offset : offset+2])
+	offset += 2
+	ExtensionsEnd := offset + int(ExtensionsLength)
+	if ExtensionsEnd > headerLen {
+		return Version
+	}
+	for offset < ExtensionsEnd {
+		if offset+4 > headerLen {
+			return Version
+		}
+		ExtensionType := binary.BigEndian.Uint16(header[offset : offset+2])
+		offset += 2
+		ExtensionLength := binary.BigEndian.Uint16(header[offset : offset+2])
+		offset += 2
+		if ExtensionType == 43 {
+			SupportedVersionsLength := int(header[offset])
+			for i := 0; i < SupportedVersionsLength/2; i++ {
+				VersionOffset := offset + 1 + i*2
+				SupportedVersion := binary.BigEndian.Uint16(header[VersionOffset : VersionOffset+2])
+				if (SupportedVersion < 0x0FFF) && SupportedVersion > Version {
+					Version = SupportedVersion
+				}
+			}
+			return Version
+		}
+
+		offset += int(ExtensionLength)
+	}
+
+	return Version
+}
+
+func GetTLSVersionString(version uint16) string {
+	switch version {
+	case 0x300:
+		return "SSL 3.0"
+	case 0x301:
+		return "TLS 1.0"
+	case 0x302:
+		return "TLS 1.1"
+	case 0x303:
+		return "TLS 1.2"
+	case 0x304:
+		return "TLS 1.3"
+	default:
+		return "unknow"
+	}
 }
 
 func TLSFragment(header []byte, frag_size int) []byte {
@@ -582,7 +677,7 @@ func LoadProfile(filename string) error {
 						} else {
 							ip := net.ParseIP(keys[0])
 							records := new(DNSRecords)
-							if CurrentInterface.Hint&HINT_MODIFY != 0 || CurrentInterface.Protocol != 0 {
+							if CurrentInterface.Hint&HINT_FAKEIP != 0 {
 								records.Index = AddDNSLie(keys[0], CurrentInterface)
 								records.ALPN = CurrentInterface.Hint & HINT_DNS
 							}
@@ -920,7 +1015,7 @@ func (outbound *OutboundConfig) StartClient() error {
 	return nil
 }
 
-func (outbound *Outbound) Upgrade(conn net.Conn, host string, port int, b []byte) (net.Conn, error) {
+func (outbound *Outbound) Upgrade(conn net.Conn, host string, port int) (net.Conn, error) {
 	return nil, nil
 }
 

@@ -154,41 +154,60 @@ func (outbound *Outbound) dial(host string, port int, b []byte, offset int, leng
 	hint := outbound.Hint
 
 	if hint&HINT_FAKE == 0 {
-		if conn == nil {
-			raddr := raddrs[mathrand.Intn(len(raddrs))]
-			var laddr *net.TCPAddr = nil
-			if device != "" {
-				laddr, err = GetLocalTCPAddr(device, raddr.IP.To4() == nil)
-				if err != nil {
-					return nil, nil, err
-				}
-			}
-
-			conn, err = net.DialTCP("tcp", laddr, raddr)
+		raddr := raddrs[mathrand.Intn(len(raddrs))]
+		var laddr *net.TCPAddr = nil
+		if device != "" {
+			laddr, err = GetLocalTCPAddr(device, raddr.IP.To4() == nil)
 			if err != nil {
 				return nil, nil, err
 			}
 		}
 
-		proxyConn, err := outbound.ProxyHandshake(conn, nil, host, port, b)
+		conn, err = net.DialTCP("tcp", laddr, raddr)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		proxyConn, err := outbound.ProxyHandshake(conn, nil, host, port)
+		
+		if err == nil && b != nil {
+			SegOffset := 0
+			cut := offset + length/2
+			if cut > 4 {
+				if hint&(HINT_TCPFRAG) != 0 {
+					_, err = conn.Write(b[SegOffset:1])
+					if err == nil {
+						if hint&(HINT_OOB) != 0 {
+							err = SendWithOption(conn, b[1:3], b[3:4], 0, 0)
+						} else {
+							_, err = conn.Write(b[1:4])
+						}
+						SegOffset += 4
+					}
+				}
+
+				if hint&(HINT_OOB) != 0 {
+					oob := []byte{0}
+					cut := offset + length/2
+					if cut > 4 && hint&HINT_OOB != 0 {
+						err = SendWithOption(conn, b[SegOffset:cut], oob, 0, 0)
+						SegOffset = cut
+					}
+				}
+			}
+
+			if err == nil {
+				_, err = conn.Write(b[SegOffset:])
+			}
+		}
+
 		if err != nil {
 			conn.Close()
 			return nil, nil, err
 		}
+
 		return proxyConn, nil, err
 	} else {
-		if b != nil {
-			if hint&HINT_TFO != 0 {
-				length = len(b)
-			} else if offset == 0 {
-				if b[0] == 0x16 {
-					offset, length, _ = GetSNI(b)
-				} else {
-					offset, length = GetHost(b)
-				}
-			}
-		}
-
 		send_magic_packet := func(connInfo *ConnectionInfo, payload []byte, hint uint32, ttl uint8, count int) error {
 			var mss uint32 = 1220
 			var segment uint32 = 0
@@ -222,7 +241,7 @@ func (outbound *Outbound) dial(host string, port int, b []byte, offset int, leng
 
 			conn, err = net.DialTCP("tcp", laddr, raddr)
 			if err == nil {
-				conn, err = outbound.ProxyHandshake(conn, nil, host, port, nil)
+				conn, err = outbound.ProxyHandshake(conn, nil, host, port)
 			}
 
 			if err == nil && b != nil {
@@ -232,7 +251,7 @@ func (outbound *Outbound) dial(host string, port int, b []byte, offset int, leng
 					if hint&HINT_TTL != 0 {
 						tos = int(outbound.TTL) << 2
 					}
-					if SendWithOption(conn, b[:cut], tos, 1) == nil {
+					if SendWithOption(conn, b[:cut], nil, tos, 1) == nil {
 						_, err = conn.Write(b[cut:])
 					}
 				} else {
@@ -328,7 +347,7 @@ func (outbound *Outbound) dial(host string, port int, b []byte, offset int, leng
 			synpacket.TCP.Seq++
 
 			if outbound.Protocol != 0 {
-				conn, err = outbound.ProxyHandshake(conn, synpacket, host, port, nil)
+				conn, err = outbound.ProxyHandshake(conn, synpacket, host, port)
 				if err != nil {
 					conn.Close()
 					return nil, nil, err

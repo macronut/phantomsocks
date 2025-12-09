@@ -21,12 +21,14 @@ var HintMap = map[string]uint32{
 	"h2":    HINT_HTTP2,
 	"h3":    HINT_HTTP3,
 
-	"ipv4": HINT_IPV4,
-	"ipv6": HINT_IPV6,
+	"ipv4":   HINT_IPV4,
+	"ipv6":   HINT_IPV6,
+	"fakeip": HINT_FAKEIP,
 
 	"move":     HINT_MOVE,
 	"strip":    HINT_STRIP,
 	"fronting": HINT_FRONTING,
+	"tls1.3":   HINT_TLS1_3,
 
 	"ttl":    HINT_TTL,
 	"w-md5":  HINT_WMD5,
@@ -34,6 +36,7 @@ var HintMap = map[string]uint32{
 	"w-ack":  HINT_WACK,
 	"w-csum": HINT_WCSUM,
 	"w-seq":  HINT_WSEQ,
+	"oob":    HINT_OOB,
 
 	"udp":    HINT_UDP,
 	"no-tcp": HINT_NOTCP,

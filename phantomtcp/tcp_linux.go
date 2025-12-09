@@ -148,7 +148,7 @@ func GetOriginalDST(conn *net.TCPConn) (*net.TCPAddr, error) {
 	}
 }
 
-func SendWithOption(conn net.Conn, payload []byte, tos int, ttl int) error {
+func SendWithOption(conn net.Conn, payload, oob []byte, tos int, ttl int) error {
 	f, err := conn.(*net.TCPConn).File()
 	if err != nil {
 		return err
@@ -169,7 +169,15 @@ func SendWithOption(conn net.Conn, payload []byte, tos int, ttl int) error {
 		}
 	}
 
-	_, err = conn.Write(payload)
+	if oob != nil {
+		buf := make([]byte, len(payload)+1)
+		copy(buf, payload)
+		buf[len(payload)] = oob[0]
+		err = syscall.Sendto(fd, buf, syscall.MSG_OOB, nil)
+	} else {
+		_, err = conn.Write(payload)
+	}
+
 	if err != nil {
 		return err
 	}
@@ -208,15 +216,18 @@ func TProxyTCP(address string) {
 		}
 		go func(conn net.Conn) {
 			addr := conn.LocalAddr().(*net.TCPAddr)
-			ip4 := addr.IP.To4()
-			port := addr.Port
-			if ip4 != nil {
-				TCPAddr := net.TCPAddr{IP: ip4, Port: port, Zone: ""}
-				tcp_redirect(conn, &TCPAddr, "", nil)
-			} else {
-				TCPAddr := net.TCPAddr{IP: addr.IP, Port: port, Zone: ""}
-				tcp_redirect(conn, &TCPAddr, "", nil)
+			if addr == laddr {
+				conn.Close()
+				return
 			}
+
+			TCPAddr := net.TCPAddr{IP: addr.IP, Port: addr.Port, Zone: ""}
+			ip4 := addr.IP.To4()
+			if ip4 != nil {
+				TCPAddr.IP = ip4
+			}
+
+			tcp_redirect(conn, &TCPAddr, "", nil)
 		}(conn)
 	}
 }

@@ -272,13 +272,11 @@ func StartHolePunching(inbound InboundConfig) {
 	for {
 		if inbound.Device != "" {
 			laddr, err = GetLocalUDPAddr(inbound.Device, ipv6)
-			if err == nil {
-				laddr.Port = sport
-			}
 			if err != nil {
 				logPrintln(1, err)
 				continue
 			}
+			laddr.Port = sport
 		}
 
 		for _, peer := range inbound.Peers {
@@ -292,6 +290,6 @@ func StartHolePunching(inbound InboundConfig) {
 			}
 		}
 
-		time.Sleep(time.Duration(25 * int(time.Second)))
+		time.Sleep(time.Duration(25 * time.Second))
 	}
 }

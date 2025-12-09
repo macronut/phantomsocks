@@ -371,6 +371,14 @@ func tcp_redirect(client net.Conn, addr *net.TCPAddr, domain string, header []by
 						}
 					}
 
+					if outbound.Hint&HINT_TLS1_3 != 0 {
+						version := GetTLSVersion(header)
+						if version < 0x304 {
+							logPrintln(4, domain, "version:", GetTLSVersionString(version))
+							return
+						}
+					}
+
 					if outbound.Hint&HINT_TLSFRAG != 0 {
 						header = TLSFragment(header, offset+length/2)
 						offset += 2
@@ -757,7 +765,7 @@ func Netcat(client net.Conn) {
 	}
 }
 
-func (outbound *Outbound) ProxyHandshake(conn net.Conn, synpacket *ConnectionInfo, host string, port int, header []byte) (net.Conn, error) {
+func (outbound *Outbound) ProxyHandshake(conn net.Conn, synpacket *ConnectionInfo, host string, port int) (net.Conn, error) {
 	var err error
 	proxy_err := errors.New("invalid proxy")
 
@@ -958,10 +966,6 @@ func (outbound *Outbound) ProxyHandshake(conn net.Conn, synpacket *ConnectionInf
 
 	if synpacket != nil {
 		synpacket.TCP.Seq += proxy_seq
-	}
-
-	if err == nil && header != nil {
-		_, err = conn.Write(header)
 	}
 
 	return conn, err
