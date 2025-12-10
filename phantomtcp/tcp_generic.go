@@ -8,14 +8,23 @@ import (
 	"time"
 )
 
+func DialWithOption(laddr, raddr *net.TCPAddr, ttl, mss int, tcpfastopen, keepalive bool, timeout time.Duration) (net.Conn, error) {
+	d := net.Dialer{Timeout: timeout, LocalAddr: laddr}
+	return d.Dial("tcp", raddr.String())
+}
+
 func DialConnInfo(laddr, raddr *net.TCPAddr, outbound *Outbound, payload []byte) (net.Conn, *ConnectionInfo, error) {
 	addr := raddr.String()
 	timeout := time.Millisecond * time.Duration(outbound.Timeout)
 
 	AddConn(addr, outbound.Hint)
 
-	d := net.Dialer{Timeout: timeout, LocalAddr: laddr}
-	conn, err := d.Dial("tcp", addr)
+	conn, err := DialWithOption(
+		laddr, raddr,
+		int(outbound.MaxTTL), int(outbound.MTU),
+		(outbound.Hint&HINT_TFO) != 0, (outbound.Hint&HINT_KEEPALIVE) != 0,
+		timeout)
+
 	if err != nil {
 		DelConn(raddr.String())
 		return nil, nil, err

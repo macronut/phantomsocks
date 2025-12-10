@@ -51,7 +51,6 @@ var HintMap = map[string]uint32{
 	"rand":       HINT_RAND,
 	"tcp-frag":   HINT_TCPFRAG,
 	"tls-frag":   HINT_TLSFRAG,
-	"half-tfo":   HINT_HTFO,
 	"keep-alive": HINT_KEEPALIVE,
 	"synx2":      HINT_SYNX2,
 	"zero":       HINT_ZERO,
@@ -135,9 +134,9 @@ func connectionMonitor(layer uint8) {
 				ch := ConnInfo4[srcPort]
 				connInfo := &ConnectionInfo{nil, ip, *tcp}
 
-				if hint&(HINT_TFO|HINT_HTFO|HINT_SYNX2) != 0 {
+				if hint&(HINT_TFO|HINT_SYNX2) != 0 {
 					if synack {
-						if hint&(HINT_TFO|HINT_HTFO) != 0 {
+						if hint&HINT_TFO != 0 {
 							for _, op := range tcp.Options {
 								if op.OptionType == 34 {
 									TFOCookies.Store(ip.DstIP.String(), op.OptionData)
@@ -145,7 +144,7 @@ func connectionMonitor(layer uint8) {
 							}
 						}
 						ConnWait4[srcPort] = 0
-					} else if hint&(HINT_TFO|HINT_HTFO) != 0 {
+					} else if hint&HINT_TFO != 0 {
 						if ip.TTL < 128 {
 							count := 1
 							if hint&HINT_SYNX2 != 0 {
@@ -226,9 +225,9 @@ func connectionMonitor(layer uint8) {
 				ch := ConnInfo6[srcPort]
 				connInfo := &ConnectionInfo{nil, ip, *tcp}
 
-				if hint&(HINT_TFO|HINT_HTFO|HINT_SYNX2) != 0 {
+				if hint&(HINT_TFO|HINT_SYNX2) != 0 {
 					if synack {
-						if hint&(HINT_TFO|HINT_HTFO) != 0 {
+						if hint&HINT_TFO != 0 {
 							for _, op := range tcp.Options {
 								if op.OptionType == 34 {
 									TFOCookies.Store(ip.DstIP.String(), op.OptionData)
@@ -236,7 +235,7 @@ func connectionMonitor(layer uint8) {
 							}
 						}
 						ConnWait6[srcPort] = 0
-					} else if hint&(HINT_TFO|HINT_HTFO) != 0 {
+					} else if hint&HINT_TFO != 0 {
 						if ip.HopLimit < 128 {
 							count := 1
 							if hint&HINT_SYNX2 != 0 {

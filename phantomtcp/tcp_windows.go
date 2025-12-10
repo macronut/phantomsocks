@@ -6,48 +6,53 @@ import (
 	"time"
 )
 
-func DialConnInfo(laddr, raddr *net.TCPAddr, server *Outbound, payload []byte) (net.Conn, *ConnectionInfo, error) {
-	var conn net.Conn
-	var err error
+func DialWithOption(laddr, raddr *net.TCPAddr, ttl, mss int, tcpfastopen, keepalive bool, timeout time.Duration) (net.Conn, error) {
+	if tcpfastopen || keepalive {
+		d := net.Dialer{Timeout: timeout, LocalAddr: laddr,
+			Control: func(network, address string, c syscall.RawConn) error {
+				err := c.Control(func(fd uintptr) {
+					f := syscall.Handle(fd)
+					if tcpfastopen {
+						if raddr.IP.To4() == nil {
+							syscall.SetsockoptInt(f, syscall.IPPROTO_IPV6, syscall.IPV6_UNICAST_HOPS, int(TFOSynID)|64)
+						} else {
+							syscall.SetsockoptInt(f, syscall.IPPROTO_IP, syscall.IP_TTL, int(TFOSynID)|64)
+						}
+						TFOSynID++
+					}
+					if keepalive {
+						syscall.SetsockoptInt(f, syscall.SOL_SOCKET, syscall.SO_KEEPALIVE, 1)
+					}
+				})
+				return err
+			}}
+		return d.Dial("tcp", raddr.String())
+	} else {
+		d := net.Dialer{Timeout: timeout, LocalAddr: laddr}
+		return d.Dial("tcp", raddr.String())
+	}
+}
 
+func DialConnInfo(laddr, raddr *net.TCPAddr, outbound *Outbound, payload []byte) (net.Conn, *ConnectionInfo, error) {
 	addr := raddr.String()
-	timeout := time.Millisecond * time.Duration(server.Timeout)
+	timeout := time.Millisecond * time.Duration(outbound.Timeout)
 
 	tfo_id := 0
 	if payload != nil {
 		tfo_id = int(TFOSynID) % 64
-		TFOSynID++
 		TFOPayload[tfo_id] = payload
 		defer func() {
 			TFOPayload[tfo_id] = nil
 		}()
 	}
 
-	AddConn(addr, server.Hint)
+	AddConn(addr, outbound.Hint)
 
-	if (server.Hint & (HINT_TFO | HINT_HTFO | HINT_KEEPALIVE)) != 0 {
-		d := net.Dialer{Timeout: timeout, LocalAddr: laddr,
-			Control: func(network, address string, c syscall.RawConn) error {
-				err := c.Control(func(fd uintptr) {
-					f := syscall.Handle(fd)
-					if (server.Hint & (HINT_TFO | HINT_HTFO)) != 0 {
-						if server.Hint&HINT_IPV6 != 0 {
-							syscall.SetsockoptInt(f, syscall.IPPROTO_IPV6, syscall.IPV6_UNICAST_HOPS, tfo_id|64)
-						} else {
-							syscall.SetsockoptInt(f, syscall.IPPROTO_IP, syscall.IP_TTL, tfo_id|64)
-						}
-					}
-					if (server.Hint & HINT_KEEPALIVE) != 0 {
-						syscall.SetsockoptInt(f, syscall.SOL_SOCKET, syscall.SO_KEEPALIVE, 1)
-					}
-				})
-				return err
-			}}
-		conn, err = d.Dial("tcp", addr)
-	} else {
-		d := net.Dialer{Timeout: timeout, LocalAddr: laddr}
-		conn, err = d.Dial("tcp", addr)
-	}
+	conn, err := DialWithOption(
+		laddr, raddr,
+		int(outbound.MaxTTL), int(outbound.MTU),
+		(outbound.Hint&HINT_TFO) != 0, (outbound.Hint&HINT_KEEPALIVE) != 0,
+		timeout)
 
 	if err != nil {
 		DelConn(raddr.String())
@@ -73,35 +78,7 @@ func DialConnInfo(laddr, raddr *net.TCPAddr, server *Outbound, payload []byte) (
 	}
 
 	DelConn(raddr.String())
-	/*
-		if (payload != nil) || (server.MaxTTL != 0) {
-			if connInfo == nil {
-				conn.Close()
-				return nil, nil, nil
-			}
-			f, err := conn.(*net.TCPConn).File()
-			if err != nil {
-				conn.Close()
-				return nil, nil, err
-			}
-			fd := syscall.Handle(f.Fd())
-			err = syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_TOS, 0)
-			if err != nil {
-				conn.Close()
-				return nil, nil, err
-			}
-			if server.MaxTTL != 0 {
-				err = syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_TTL, int(server.MaxTTL))
-			} else {
-				err = syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_TTL, 64)
-			}
-			if err != nil {
-				conn.Close()
-				return nil, nil, err
-			}
-			f.Close()
-		}
-	*/
+
 	return conn, nil, nil
 }
 

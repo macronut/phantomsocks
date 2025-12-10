@@ -14,23 +14,25 @@ var HintMap = map[string]uint32{
 	"h2":    HINT_HTTP2,
 	"h3":    HINT_HTTP3,
 
-	"ipv4"   : HINT_IPV4,
-	"ipv6"   : HINT_IPV6,
-	"fakeip" : HINT_FAKEIP,
+	"ipv4":   HINT_IPV4,
+	"ipv6":   HINT_IPV6,
+	"fakeip": HINT_FAKEIP,
 
 	"move":     HINT_MOVE,
 	"strip":    HINT_STRIP,
 	"fronting": HINT_FRONTING,
 	"tls1.3":   HINT_TLS1_3,
-	
-	"oob":    HINT_OOB,
+
+	"tfo": HINT_TFO,
+	"oob": HINT_OOB,
 
 	"udp":    HINT_UDP,
 	"no-tcp": HINT_NOTCP,
 	"delay":  HINT_DELAY,
 
-	"tcp-frag": HINT_TCPFRAG,
-	"tls-frag": HINT_TLSFRAG,
+	"tcp-frag":   HINT_TCPFRAG,
+	"tls-frag":   HINT_TLSFRAG,
+	"keep-alive": HINT_KEEPALIVE,
 }
 
 func DevicePrint() {

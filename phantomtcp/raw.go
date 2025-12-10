@@ -48,7 +48,6 @@ var HintMap = map[string]uint32{
 	"rand":       HINT_RAND,
 	"tcp-frag":   HINT_TCPFRAG,
 	"tls-frag":   HINT_TLSFRAG,
-	"half-tfo":   HINT_HTFO,
 	"keep-alive": HINT_KEEPALIVE,
 	"synx2":      HINT_SYNX2,
 	"zero":       HINT_ZERO,

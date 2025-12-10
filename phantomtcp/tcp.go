@@ -163,13 +163,30 @@ func (outbound *Outbound) dial(host string, port int, b []byte, offset int, leng
 			}
 		}
 
-		conn, err = net.DialTCP("tcp", laddr, raddr)
+		tfo := hint&HINT_TFO != 0
+		keepalive := hint&HINT_KEEPALIVE != 0
+
+		startTime := time.Now().UnixMilli()
+		conn, err = DialWithOption(laddr, raddr, 0, 0, tfo, keepalive, time.Second)
+
+		if tfo && err == nil {
+			delay := time.Now().UnixMilli() - startTime
+			if delay > 0 {
+				conn.Close()
+				startTime := time.Now().UnixMilli()
+				conn, err = DialWithOption(laddr, raddr, 0, 0, tfo, keepalive, time.Second)
+				if time.Now().UnixMilli()-startTime > 0 {
+					return nil, nil, errors.New("tcp fastopen failed")
+				}
+			}
+		}
+
 		if err != nil {
 			return nil, nil, err
 		}
 
 		proxyConn, err := outbound.ProxyHandshake(conn, nil, host, port)
-		
+
 		if err == nil && b != nil {
 			SegOffset := 0
 			cut := offset + length/2
@@ -279,11 +296,11 @@ func (outbound *Outbound) dial(host string, port int, b []byte, offset int, leng
 
 			cut := offset + length/2
 			var tfo_payload []byte = nil
-			if (hint & (HINT_TFO | HINT_HTFO)) != 0 {
-				if (hint & HINT_TFO) != 0 {
-					tfo_payload = b
-				} else {
+			if hint&HINT_TFO != 0 {
+				if hint&HINT_TCPFRAG != 0 {
 					tfo_payload = b[:cut]
+				} else {
+					tfo_payload = b
 				}
 			} else if hint&HINT_RAND != 0 {
 				_, err = rand.Read(fakepayload)
@@ -359,10 +376,9 @@ func (outbound *Outbound) dial(host string, port int, b []byte, offset int, leng
 			}
 
 			count := 1
-			if (hint & (HINT_TFO | HINT_HTFO)) != 0 {
-				if (hint & HINT_HTFO) != 0 {
-					_, err = conn.Write(b[cut:])
-					if err != nil {
+			if hint&HINT_TFO != 0 {
+				if hint&HINT_TCPFRAG != 0 {
+					if _, err = conn.Write(b[cut:]); err != nil {
 						conn.Close()
 						return nil, nil, err
 					}

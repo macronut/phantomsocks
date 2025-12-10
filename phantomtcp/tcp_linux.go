@@ -9,40 +9,44 @@ import (
 	"github.com/macronut/go-tproxy"
 )
 
-func DialConnInfo(laddr, raddr *net.TCPAddr, outbound *Outbound, payload []byte) (net.Conn, *ConnectionInfo, error) {
-	addr := raddr.String()
-	timeout := time.Millisecond * time.Duration(outbound.Timeout)
-
-	tfo_id := 0
-	if payload != nil {
-		tfo_id = int(TFOSynID) % 64
-		TFOSynID++
-		TFOPayload[tfo_id] = payload
-		defer func() {
-			TFOPayload[tfo_id] = nil
-		}()
-	}
-
-	AddConn(addr, outbound.Hint)
-
+func DialWithOption(laddr, raddr *net.TCPAddr, ttl, mss int, tcpfastopen, keepalive bool, timeout time.Duration) (net.Conn, error) {
 	d := net.Dialer{Timeout: timeout, LocalAddr: laddr,
 		Control: func(network, address string, c syscall.RawConn) error {
 			err := c.Control(func(fd uintptr) {
-				if (outbound.MTU) > 0 {
-					syscall.SetsockoptInt(int(fd), syscall.SOL_TCP, syscall.TCP_MAXSEG, int(outbound.MTU))
-					//syscall.SetsockoptInt(int(fd), syscall.SOL_TCP, syscall.TCP_MSS, int(outbound.MTU))
+				if mss > 0 {
+					syscall.SetsockoptInt(int(fd), syscall.SOL_TCP, syscall.TCP_MAXSEG, mss)
+					//syscall.SetsockoptInt(int(fd), syscall.SOL_TCP, syscall.TCP_MSS, mss)
 				}
-				if (outbound.Hint & (HINT_TFO | HINT_HTFO)) != 0 {
-					syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_TOS, tfo_id<<2)
-					syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_TTL, int(outbound.TTL))
+				if tcpfastopen {
+					// #define TCP_FASTOPEN_CONNECT 30
+					syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, 30, 1)
 				}
-				if (outbound.Hint & HINT_KEEPALIVE) != 0 {
+				if ttl > 0 {
+					//syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_TOS, 0)
+					syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_TTL, ttl)
+				}
+				if keepalive {
 					syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_KEEPALIVE, 1)
 				}
 			})
 			return err
 		}}
-	conn, err := d.Dial("tcp", addr)
+
+	return d.Dial("tcp", raddr.String())
+}
+
+func DialConnInfo(laddr, raddr *net.TCPAddr, outbound *Outbound, payload []byte) (net.Conn, *ConnectionInfo, error) {
+	addr := raddr.String()
+	timeout := time.Millisecond * time.Duration(outbound.Timeout)
+
+	AddConn(addr, outbound.Hint)
+
+	conn, err := DialWithOption(
+		laddr, raddr, 
+		int(outbound.MaxTTL), int(outbound.MTU), 
+		(outbound.Hint & HINT_TFO) != 0, (outbound.Hint & HINT_KEEPALIVE) != 0, 
+		timeout)
+		
 	if err != nil {
 		DelConn(raddr.String())
 		return nil, nil, err
