@@ -38,6 +38,7 @@ var HintMap = map[string]uint32{
 	"w-seq":  HINT_WSEQ,
 	"oob":    HINT_OOB,
 
+	"tfo":    HINT_TFO,
 	"udp":    HINT_UDP,
 	"no-tcp": HINT_NOTCP,
 	"delay":  HINT_DELAY,
