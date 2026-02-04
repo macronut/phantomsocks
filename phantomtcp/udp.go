@@ -104,6 +104,7 @@ func (outbound *Outbound) DialUDPProxy(host string, port int) (net.Conn, net.Con
 			}
 			laddr = &net.UDPAddr{IP: _laddr.IP, Port: 0}
 		}
+		laddr.Port = rand.Intn(raddr.Port-1) + 1
 		udpConn, err := net.DialUDP("udp", laddr, &net.UDPAddr{IP: raddr.IP, Port: raddr.Port})
 		return udpConn, nil, err
 	case SOCKS5:

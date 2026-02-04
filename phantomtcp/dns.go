@@ -60,7 +60,7 @@ func TCPlookup(request []byte, address string) ([]byte, error) {
 
 	if outbound != nil {
 		host, port := splitHostPort(address)
-		conn, _, err = outbound.dial(host, port, data[:len(request)+2], 0, 0)
+		conn, _, err = outbound.dial(host, port, data[:len(request)+2], 2, len(request))
 	} else {
 		conn, err = net.DialTimeout("tcp", address, time.Second*5)
 		if err == nil {
