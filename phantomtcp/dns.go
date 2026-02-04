@@ -1251,6 +1251,12 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 	CurrentTime := time.Now().Unix()
 	IsUnknownType := false
 
+	if outbound == nil {
+		outbound, _ = DefaultProfile.GetOutbound(name)
+	}
+
+	UseVaddr := (outbound.Hint & HINT_FAKEIP) != 0
+
 	switch qtype {
 	case 1:
 		if records.IPv4Hint != nil {
@@ -1271,15 +1277,14 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 			return records.Index, records.BuildResponse(request, qtype, 60)
 		}
 	case 65:
+		if UseVaddr && records.Index == 0 {
+			records.Index = AddDNSLie(name, outbound)
+		}
 		if records.ALPN&(HINT_HTTPS|HINT_HTTP2|HINT_HTTP3) != 0 {
 			return records.Index, records.BuildResponse(request, qtype, 3600)
 		}
 	default:
 		IsUnknownType = true
-	}
-
-	if outbound == nil {
-		outbound, _ = DefaultProfile.GetOutbound(name)
 	}
 
 	if outbound != nil {
@@ -1290,7 +1295,6 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 		return 0, records.BuildResponse(request, qtype, 3600)
 	}
 
-	UseVaddr := (outbound.Hint&HINT_FAKEIP) != 0
 	if UseVaddr {
 		if outbound.DNS == "" {
 			if records.Index == 0 {
