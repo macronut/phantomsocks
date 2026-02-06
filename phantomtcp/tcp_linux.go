@@ -220,7 +220,8 @@ func TProxyTCP(address string) {
 		}
 		go func(conn net.Conn) {
 			addr := conn.LocalAddr().(*net.TCPAddr)
-			if addr == laddr {
+			raddr := conn.RemoteAddr().(*net.TCPAddr)
+			if addr.IP.Equal(raddr.IP) {
 				conn.Close()
 				return
 			}

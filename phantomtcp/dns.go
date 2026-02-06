@@ -1255,7 +1255,7 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 		outbound, _ = DefaultProfile.GetOutbound(name)
 	}
 
-	UseVaddr := (outbound.Hint & HINT_FAKEIP) != 0
+	UseVaddr := outbound != nil && (outbound.Hint & HINT_FAKEIP) != 0
 
 	switch qtype {
 	case 1:
