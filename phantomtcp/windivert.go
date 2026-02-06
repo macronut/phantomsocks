@@ -45,7 +45,7 @@ var HintMap = map[string]uint32{
 	"no-tcp": HINT_NOTCP,
 	"delay":  HINT_DELAY,
 
-	"mode2":      HINT_MODE2,
+	"reverse":    HINT_REVERSE,
 	"df":         HINT_DF,
 	"sat":        HINT_SAT,
 	"rand":       HINT_RAND,

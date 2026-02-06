@@ -385,23 +385,15 @@ func (outbound *Outbound) dial(host string, port int, b []byte, offset int, leng
 				}
 				synpacket.TCP.Seq += uint32(len(b))
 			} else {
-				if hint&HINT_MODE2 != 0 {
-					synpacket.TCP.Seq += uint32(cut)
-					fakepayload = fakepayload[cut:]
-					count = 2
-				} else {
-					err = send_magic_packet(synpacket, fakepayload, hint, outbound.TTL, count)
-					if err != nil {
-						conn.Close()
-						return nil, nil, err
-					}
+				SegOffset := 0
+				if err = send_magic_packet(synpacket, fakepayload, hint, outbound.TTL, count); err != nil {
+					conn.Close()
+					return nil, nil, err
 				}
 
-				SegOffset := 0
 				if hint&(HINT_TCPFRAG) != 0 && cut > 4 {
 					SegOffset = 4
-					_, err = conn.Write(b[:1])
-					if err == nil {
+					if _, err = conn.Write(b[:1]); err == nil {
 						_, err = conn.Write(b[1:4])
 					}
 					if err != nil {
@@ -410,25 +402,43 @@ func (outbound *Outbound) dial(host string, port int, b []byte, offset int, leng
 					}
 				}
 
-				_, err = conn.Write(b[SegOffset:cut])
-				if err != nil {
-					conn.Close()
-					return nil, nil, err
+				if hint&HINT_REVERSE != 0 {
+					synpacket.TCP.Seq += uint32(cut)
+					if err = send_magic_packet(synpacket, b[cut:], HINT_NONE, 64, count); err != nil {
+						conn.Close()
+						return nil, nil, err
+					}
+
+					if _, err = conn.Write(b[SegOffset:cut]); err != nil {
+						conn.Close()
+						return nil, nil, err
+					}
+
+					if _, err = conn.Write(fakepayload[cut:]); err != nil {
+						conn.Close()
+						return nil, nil, err
+					}
+
+					synpacket.TCP.Seq += uint32(len(b) - cut)
+				} else {
+					if _, err = conn.Write(b[SegOffset:cut]); err != nil {
+						conn.Close()
+						return nil, nil, err
+					}
+
+					if err = send_magic_packet(synpacket, fakepayload, hint, outbound.TTL, count); err != nil {
+						conn.Close()
+						return nil, nil, err
+					}
+
+					if _, err = conn.Write(b[cut:]); err != nil {
+						conn.Close()
+						return nil, nil, err
+					}
+
+					synpacket.TCP.Seq += uint32(len(b))
 				}
 
-				err = send_magic_packet(synpacket, fakepayload, hint, outbound.TTL, count)
-				if err != nil {
-					conn.Close()
-					return nil, nil, err
-				}
-
-				_, err = conn.Write(b[cut:])
-				if err != nil {
-					conn.Close()
-					return nil, nil, err
-				}
-
-				synpacket.TCP.Seq += uint32(len(b))
 				if hint&HINT_SAT != 0 {
 					_, err = rand.Read(fakepayload)
 					if err != nil {

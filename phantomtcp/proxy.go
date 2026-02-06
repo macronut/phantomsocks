@@ -700,7 +700,7 @@ func (outbound *Outbound) ProxyHandshake(conn net.Conn, synpacket *ConnectionInf
 					if err != nil {
 						return conn, err
 					}
-				} else if hint&HINT_MODE2 != 0 {
+				} else if hint&HINT_REVERSE != 0 {
 					n, err = conn.Write(request[:10])
 					if err != nil {
 						return conn, err
@@ -715,7 +715,7 @@ func (outbound *Outbound) ProxyHandshake(conn net.Conn, synpacket *ConnectionInf
 
 				if hint&HINT_TCPFRAG != 0 {
 					n, err = conn.Write(request[4:])
-				} else if hint&HINT_MODE2 != 0 {
+				} else if hint&HINT_REVERSE != 0 {
 					n, err = conn.Write(request[10:])
 				} else {
 					n, err = conn.Write(request)
