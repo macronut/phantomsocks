@@ -1255,7 +1255,14 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 		outbound, _ = DefaultProfile.GetOutbound(name)
 	}
 
-	UseVaddr := outbound != nil && (outbound.Hint & HINT_FAKEIP) != 0
+	if outbound != nil {
+		records.ALPN = outbound.Hint & HINT_DNS
+	} else {
+		logPrintln(4, "request:", name, qtype, "no answer")
+		return 0, records.BuildResponse(request, qtype, 3600)
+	}
+
+	UseVaddr := (outbound.Hint & HINT_FAKEIP) != 0
 
 	switch qtype {
 	case 1:
@@ -1287,14 +1294,6 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 		IsUnknownType = true
 	}
 
-	if outbound != nil {
-		records.ALPN = outbound.Hint & HINT_DNS
-		logPrintln(2, "request:", name, qtype, outbound.DNS, outbound.Protocol)
-	} else {
-		logPrintln(4, "request:", name, qtype, "no answer")
-		return 0, records.BuildResponse(request, qtype, 3600)
-	}
-
 	if UseVaddr {
 		if outbound.DNS == "" {
 			if records.Index == 0 {
@@ -1310,6 +1309,8 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 	if err != nil {
 		logPrintln(1, err)
 		return 0, nil
+	} else {
+		logPrintln(2, "request:", name, qtype, outbound.DNS, outbound.Protocol)
 	}
 
 	var options ServerOptions
