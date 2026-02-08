@@ -1385,6 +1385,13 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 			return 0, records.BuildResponse(request, qtype, 0)
 		}
 		logPrintln(3, "response:", name, qtype, records.IPv6Hint.Addresses)
+	case 65:
+		records.GetAnswers(response, options)
+		if records.ALPN == 0 {
+			logPrintln(4, "request", name, qtype, "no answer")
+			return 0, records.BuildResponse(request, qtype, 0)
+		}
+		logPrintln(3, "response:", name, qtype, records.ALPN)
 	default:
 		return 0, response
 	}
