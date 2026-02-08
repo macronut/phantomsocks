@@ -1317,8 +1317,11 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 	_request := request
 	_qtype := uint16(qtype)
 	if u.RawQuery != "" {
-		if records.ALPN&HINT_IPV6 != 0 {
-			_qtype = 28
+		if records.ALPN&HINT_IPV4 != 0 && qtype == 28 {
+			return records.Index, records.BuildResponse(request, qtype, 0)
+		}
+		if records.ALPN&HINT_IPV6 != 0 && qtype == 1 {
+			return records.Index, records.BuildResponse(request, qtype, 0)
 		}
 
 		options = ParseOptions(u.RawQuery)
