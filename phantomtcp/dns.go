@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -1251,12 +1250,6 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 	CurrentTime := time.Now().Unix()
 	IsUnknownType := false
 
-	if outbound == nil {
-		outbound, _ = DefaultProfile.GetOutbound(name)
-	}
-
-	UseVaddr := outbound != nil && (outbound.Hint & HINT_FAKEIP) != 0
-
 	switch qtype {
 	case 1:
 		if records.IPv4Hint != nil {
@@ -1277,14 +1270,15 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 			return records.Index, records.BuildResponse(request, qtype, 60)
 		}
 	case 65:
-		if UseVaddr && records.Index == 0 {
-			records.Index = AddDNSLie(name, outbound)
-		}
 		if records.ALPN&(HINT_HTTPS|HINT_HTTP2|HINT_HTTP3) != 0 {
 			return records.Index, records.BuildResponse(request, qtype, 3600)
 		}
 	default:
 		IsUnknownType = true
+	}
+
+	if outbound == nil {
+		outbound, _ = DefaultProfile.GetOutbound(name)
 	}
 
 	if outbound != nil {
@@ -1295,14 +1289,12 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 		return 0, records.BuildResponse(request, qtype, 3600)
 	}
 
+	UseVaddr := (outbound.Hint & HINT_FAKEIP) != 0
 	if UseVaddr {
-		if outbound.DNS == "" {
-			if records.Index == 0 {
-				records.Index = AddDNSLie(name, outbound)
-			}
+		if IsUnknownType {
 			return records.Index, records.BuildResponse(request, qtype, 3600)
-		} else if IsUnknownType {
-			return records.Index, records.BuildResponse(request, qtype, 3600)
+		} else {
+			return records.Index, records.BuildResponse(request, qtype, 600)
 		}
 	}
 
@@ -1317,10 +1309,6 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 	_request := request
 	_qtype := uint16(qtype)
 	if u.RawQuery != "" {
-		if records.ALPN&HINT_IPV6 != 0 {
-			_qtype = 28
-		}
-
 		options = ParseOptions(u.RawQuery)
 		if options.Type == "A" && qtype == 28 {
 			return records.Index, records.BuildResponse(request, qtype, 0)
@@ -1392,7 +1380,7 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 	default:
 		return 0, response
 	}
-
+/*
 	if UseVaddr && (records.Index == 0) {
 		records.Index = AddDNSLie(name, outbound)
 
@@ -1422,6 +1410,7 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 			}
 		}
 	}
+*/
 
 	return records.Index, records.BuildResponse(request, qtype, 0)
 }
