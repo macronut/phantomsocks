@@ -1294,6 +1294,9 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 		if IsUnknownType {
 			return records.Index, records.BuildResponse(request, qtype, 3600)
 		} else {
+			if records.Index == 0 {
+				records.Index = AddDNSLie(name, outbound)
+			}
 			return records.Index, records.BuildResponse(request, qtype, 600)
 		}
 	}
