@@ -1,5 +1,4 @@
 //go:build linux && rawsocket
-// +build linux,rawsocket
 
 package phantomtcp
 

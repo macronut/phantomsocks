@@ -63,17 +63,18 @@ func GetHeader(conn net.Conn) ([]byte, error) {
 	}
 
 	if buf[0] == 0x16 {
+		recvLen := n
 		headerLen := GetHelloLength(buf[:n]) + 5
-		if headerLen > 2440 {
-			return nil, errors.New("tls hello is too big")
-		}
-		if headerLen > n {
+		if headerLen > recvLen {
 			header := make([]byte, headerLen)
-			copy(header[:], buf[:n])
-			n, err = conn.Read(header[n:])
-			if err == nil {
-				return header, err
+			copy(header[:], buf[:recvLen])
+			for headerLen > recvLen {
+				if n, err = conn.Read(header[recvLen:]); err != nil || n == 0 {
+					return header[:recvLen], err
+				}
+				recvLen += n
 			}
+			return header, nil
 		}
 	}
 
@@ -874,7 +875,7 @@ func (outbound *Outbound) ProxyHandshake(conn net.Conn, synpacket *ConnectionInf
 	}
 
 	if synpacket != nil {
-		synpacket.TCP.Seq += proxy_seq
+		synpacket.AddTCPSeq(proxy_seq)
 	}
 
 	return conn, err

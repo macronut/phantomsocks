@@ -1,11 +1,14 @@
 package phantomtcp
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"syscall"
 	"time"
+	"unsafe"
 
+	"golang.org/x/sys/unix"
 	"github.com/macronut/go-tproxy"
 )
 
@@ -197,6 +200,105 @@ func SendWithOption(conn net.Conn, payload, oob []byte, tos int, ttl int) error 
 		err = syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_TTL, 64)
 		if err != nil {
 			return err
+		}
+	}
+
+	return nil
+}
+
+func GetTCPState(conn net.Conn) (uint8, error) {
+	f, err := conn.(*net.TCPConn).File()
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	fd := f.Fd()
+
+	tcpInfo := syscall.TCPInfo{}
+	size := unsafe.Sizeof(tcpInfo)
+	var errno syscall.Errno
+	_, _, errno = syscall.Syscall6(syscall.SYS_GETSOCKOPT, fd, syscall.SOL_TCP, syscall.TCP_INFO, uintptr(unsafe.Pointer(&tcpInfo)), uintptr(unsafe.Pointer(&size)), 0)
+	if errno != 0 {
+		return 0, fmt.Errorf("syscall failed. errno=%d", errno)
+	}
+	return tcpInfo.State, nil
+}
+
+func SetsockoptTCPMD5Sig(fd uintptr, s *unix.TCPMD5Sig) error {
+	size := unsafe.Sizeof(*s)
+	var errno syscall.Errno
+	_, _, errno = syscall.Syscall6(syscall.SYS_SETSOCKOPT, fd, syscall.IPPROTO_TCP, syscall.TCP_MD5SIG, uintptr(unsafe.Pointer(s)), uintptr(unsafe.Pointer(&size)), 0)
+	if errno != 0 {
+		return fmt.Errorf("syscall failed. errno=%d", errno)
+	}
+	return nil
+}
+
+func (outbound *Outbound)SendWithFakePayload(conn net.Conn, fakepayload, realpayload []byte) error {
+	fakepaylen := len(fakepayload)
+	f, err := conn.(*net.TCPConn).File()
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	fd := f.Fd()
+
+	pipeFds := [2]int{}
+	if err := unix.Pipe(pipeFds[:]); err != nil {
+		return fmt.Errorf("pipe creation failed: %w", err)
+	}
+	defer unix.Close(pipeFds[0])
+	defer unix.Close(pipeFds[1])
+	logPrintln(2, "pipe creation success", pipeFds[0], pipeFds[1])
+
+	mmapLen := ((fakepaylen - 1) / 4 + 1) * 4
+	mmapBuf, err := unix.Mmap(
+		-1, 0, mmapLen,
+		unix.PROT_READ|unix.PROT_WRITE,
+		unix.MAP_PRIVATE|unix.MAP_ANONYMOUS,
+	)
+	if err != nil {
+		return fmt.Errorf("mmap failed: %w", err)
+	}
+	defer unix.Munmap(mmapBuf)
+	copy(mmapBuf, fakepayload)
+	
+	if outbound.Hint & HINT_TTL != 0 {
+		if err := unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_TTL, int(outbound.TTL)); err != nil {
+			return fmt.Errorf("set fake TTL failed: %w", err)
+		}
+	}
+	if outbound.Hint & HINT_WMD5 != 0 {
+		tcpMD5Sig := unix.TCPMD5Sig{}
+		if err := SetsockoptTCPMD5Sig(fd, &tcpMD5Sig); err != nil {
+			return fmt.Errorf("set MD5 failed: %w", err)
+		}
+	}
+
+	iov := unix.Iovec{Base: &mmapBuf[0]}
+	iov.SetLen(fakepaylen)
+
+	_, _, errno := unix.Syscall6(unix.SYS_VMSPLICE, uintptr(pipeFds[1]),  uintptr(unsafe.Pointer(&iov)),  1,  2,  0, 0)
+	if errno != 0 {
+		return fmt.Errorf("vmsplice failed: %w", errno)
+	}
+	_, _, errno = unix.Syscall6(unix.SYS_SPLICE, uintptr(pipeFds[0]), 0, fd, 0, uintptr(fakepaylen), 0)
+	if errno != 0 {
+		return fmt.Errorf("splice failed: %w", errno)
+	}
+
+	time.Sleep(time.Millisecond * 50)
+	copy(mmapBuf, realpayload[:fakepaylen])
+
+	if outbound.Hint & HINT_TTL != 0 {
+		if err := unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_TTL, 64); err != nil {
+			return fmt.Errorf("set default TTL failed: %w", err)
+		}
+	}
+	if outbound.Hint & HINT_WMD5 != 0 {
+		tcpMD5Sig := unix.TCPMD5Sig{}
+		if err := SetsockoptTCPMD5Sig(fd, &tcpMD5Sig); err != nil {
+			return fmt.Errorf("remove MD5 failed: %w", err)
 		}
 	}
 

@@ -1,5 +1,4 @@
 //go:build !linux && !windows
-// +build !linux,!windows
 
 package phantomtcp
 
@@ -70,6 +69,14 @@ func GetOriginalDST(conn *net.TCPConn) (*net.TCPAddr, error) {
 
 func SendWithOption(conn net.Conn, payload, oob []byte, tos, ttl int) error {
 	return nil
+}
+
+func (outbound *Outbound)SendWithFakePayload(conn net.Conn, fakepayload, realpayload []byte) error {
+	return nil
+}
+
+func GetTCPState(conn net.Conn) (uint8, error) {
+	return 0, nil
 }
 
 func TProxyTCP(address string) {

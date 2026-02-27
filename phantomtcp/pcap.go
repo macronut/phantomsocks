@@ -1,5 +1,4 @@
 //go:build pcap
-// +build pcap
 
 package phantomtcp
 

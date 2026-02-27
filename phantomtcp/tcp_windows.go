@@ -2,9 +2,14 @@ package phantomtcp
 
 import (
 	"net"
+	"sync"
 	"syscall"
 	"time"
 )
+
+var TFOCookies sync.Map
+var TFOPayload [64][]byte
+var TFOSynID uint8 = 0
 
 func DialWithOption(laddr, raddr *net.TCPAddr, ttl, mss int, tcpfastopen, keepalive bool, timeout time.Duration) (net.Conn, error) {
 	if tcpfastopen || keepalive {
@@ -101,6 +106,14 @@ func GetOriginalDST(conn *net.TCPConn) (*net.TCPAddr, error) {
 
 func SendWithOption(conn net.Conn, payload, oob []byte, tos, ttl int) error {
 	return nil
+}
+
+func (outbound *Outbound)SendWithFakePayload(conn net.Conn, fakepayload, realpayload []byte) error {
+	return nil
+}
+
+func GetTCPState(conn net.Conn) (uint8, error) {
+	return 0, nil
 }
 
 func TProxyTCP(address string) {

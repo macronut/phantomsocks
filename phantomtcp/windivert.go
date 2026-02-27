@@ -1,5 +1,4 @@
 //go:build windows && windivert
-// +build windows,windivert
 
 package phantomtcp
 

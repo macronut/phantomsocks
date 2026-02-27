@@ -130,7 +130,7 @@ func (outbound *Outbound) DialUDPProxy(host string, port int) (net.Conn, net.Con
 				}
 				return nil, nil, errors.New("connection does not exist")
 			}
-			synpacket.TCP.Seq++
+			synpacket.AddTCPSeq(1)
 		} else {
 			tcpConn, err = net.DialTCP("tcp", laddr, raddr)
 			if err != nil {
