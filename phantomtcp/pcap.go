@@ -171,39 +171,9 @@ func connectionMonitor(device string) {
 					connInfo = &ConnectionInfo{nil, ip, *tcp}
 				}
 
-				if hint&(HINT_TFO|HINT_SYNX2) != 0 {
+				if hint&(HINT_SYNX2) != 0 {
 					if synack {
-						if hint&HINT_TFO != 0 {
-							for _, op := range tcp.Options {
-								if op.OptionType == 34 {
-									TFOCookies.Store(ip.DstIP.String(), op.OptionData)
-								}
-							}
-						}
 						ConnWait4[srcPort] = 0
-					} else if hint&HINT_TFO != 0 {
-						if ip.TTL < 64 {
-							count := 1
-							if hint&HINT_SYNX2 != 0 {
-								count = 2
-							}
-
-							ip.TTL = 64
-							if tcp.SYN == true {
-								payload := TFOPayload[ip.TOS>>2]
-								if payload != nil {
-									ip.TOS = 0
-									ModifyAndSendPacket(connInfo, payload, HINT_TFO, 0, count)
-									ConnWait4[srcPort] = hint
-								} else {
-									connInfo = nil
-								}
-							} else {
-								ip.TOS = 0
-								ModifyAndSendPacket(connInfo, nil, HINT_TFO, 0, count)
-								connInfo = nil
-							}
-						}
 					} else if hint&HINT_SYNX2 != 0 {
 						SendPacket(packet)
 					}
@@ -266,39 +236,9 @@ func connectionMonitor(device string) {
 					connInfo = &ConnectionInfo{nil, ip, *tcp}
 				}
 
-				if hint&(HINT_TFO|HINT_SYNX2) != 0 {
+				if hint&HINT_SYNX2 != 0 {
 					if synack {
-						if hint&(HINT_TFO) != 0 {
-							for _, op := range tcp.Options {
-								if op.OptionType == 34 {
-									TFOCookies.Store(ip.DstIP.String(), op.OptionData)
-								}
-							}
-						}
 						ConnWait6[srcPort] = 0
-					} else if hint&HINT_TFO != 0 {
-						if ip.HopLimit < 64 {
-							count := 1
-							if hint&HINT_SYNX2 != 0 {
-								count = 2
-							}
-
-							ip.HopLimit = 64
-							if tcp.SYN == true {
-								payload := TFOPayload[ip.TrafficClass>>2]
-								if payload != nil {
-									ip.TrafficClass = 0
-									ModifyAndSendPacket(connInfo, payload, HINT_TFO, 0, count)
-									ConnWait4[srcPort] = hint
-								} else {
-									connInfo = nil
-								}
-							} else {
-								ip.TrafficClass = 0
-								ModifyAndSendPacket(connInfo, nil, HINT_TFO, 0, count)
-								connInfo = nil
-							}
-						}
 					} else if hint&HINT_SYNX2 != 0 {
 						SendPacket(packet)
 					}

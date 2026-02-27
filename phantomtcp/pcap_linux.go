@@ -75,52 +75,24 @@ func ModifyAndSendPacket(connInfo *ConnectionInfo, payload []byte, hint uint32, 
 	linkLayer := connInfo.Link
 	ipLayer := connInfo.IP
 
-	var tcpLayer *layers.TCP
-	if hint&HINT_TFO != 0 {
-		tcpLayer = &connInfo.TCP
+	tcpLayer := &layers.TCP{
+		SrcPort:    connInfo.TCP.SrcPort,
+		DstPort:    connInfo.TCP.DstPort,
+		Seq:        connInfo.TCP.Seq,
+		Ack:        connInfo.TCP.Ack,
+		DataOffset: 5,
+		ACK:        true,
+		PSH:        true,
+		Window:     connInfo.TCP.Window,
+	}
 
-		tcpLayer.Seq -= uint32(len(payload))
-		var cookie []byte = nil
-		switch ip := ipLayer.(type) {
-		case *layers.IPv4:
-			result, ok := TFOCookies.Load(ip.DstIP.String())
-			if ok {
-				cookie = result.([]byte)
-			} else {
-				payload = nil
-			}
-		case *layers.IPv6:
-			result, ok := TFOCookies.Load(ip.DstIP.String())
-			if ok {
-				cookie = result.([]byte)
-			} else {
-				payload = nil
-			}
+	if hint&HINT_WMD5 != 0 {
+		tcpLayer.Options = []layers.TCPOption{
+			layers.TCPOption{19, 16, []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
 		}
-
-		tcpLayer.Options = append(connInfo.TCP.Options,
-			layers.TCPOption{34, uint8(len(cookie)), cookie},
-		)
-	} else {
-		tcpLayer = &layers.TCP{
-			SrcPort:    connInfo.TCP.SrcPort,
-			DstPort:    connInfo.TCP.DstPort,
-			Seq:        connInfo.TCP.Seq,
-			Ack:        connInfo.TCP.Ack,
-			DataOffset: 5,
-			ACK:        true,
-			PSH:        true,
-			Window:     connInfo.TCP.Window,
-		}
-
-		if hint&HINT_WMD5 != 0 {
-			tcpLayer.Options = []layers.TCPOption{
-				layers.TCPOption{19, 16, []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
-			}
-		} else if hint&HINT_WTIME != 0 {
-			tcpLayer.Options = []layers.TCPOption{
-				layers.TCPOption{8, 8, []byte{0, 0, 0, 0, 0, 0, 0, 0}},
-			}
+	} else if hint&HINT_WTIME != 0 {
+		tcpLayer.Options = []layers.TCPOption{
+			layers.TCPOption{8, 8, []byte{0, 0, 0, 0, 0, 0, 0, 0}},
 		}
 	}
 
