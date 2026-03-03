@@ -287,7 +287,7 @@ func (outbound *Outbound)SendWithFakePayload(conn net.Conn, fakepayload, realpay
 		return fmt.Errorf("splice failed: %w", errno)
 	}
 
-	time.Sleep(time.Millisecond * 50)
+	time.Sleep(time.Millisecond * 80)
 	copy(mmapBuf, realpayload[:fakepaylen])
 
 	if outbound.Hint & HINT_TTL != 0 {

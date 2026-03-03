@@ -36,7 +36,6 @@ var HintMap = map[string]uint32{
 
 	"tcp-frag":   HINT_TCPFRAG,
 	"tls-frag":   HINT_TLSFRAG,
-	"minor-ver":  HINT_MINORVER,
 	"keep-alive": HINT_KEEPALIVE,
 }
 
@@ -73,9 +72,8 @@ func (outbound *Outbound) dial(host string, port int, b []byte, offset int, leng
 		return nil, nil, err
 	}
 
-	if hint&HINT_MINORVER != 0 {
+	if hint&HINT_TLS1_3 != 0 {
 		b[2] = 0x4
-		logPrintln(1, "MinorVer")
 	}
 
 	if tfo {
@@ -88,7 +86,7 @@ func (outbound *Outbound) dial(host string, port int, b []byte, offset int, leng
 		//TCP_ESTABLISHED = 1
 		if state == 1 {
 			conn.Close()
-			time.Sleep(40 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 			conn, err = DialWithOption(laddr, raddr, 0, 0, tfo, keepalive, timeout)
 			if state, err = GetTCPState(conn); err != nil {
 				conn.Close()
@@ -142,21 +140,29 @@ func (outbound *Outbound) dial(host string, port int, b []byte, offset int, leng
 		if err == nil && b != nil {
 			SegOffset := 0
 			cut := offset + length/2
+			oob := []byte{0}
 			if cut > 4 {
 				if hint&(HINT_TCPFRAG) != 0 {
-					_, err = conn.Write(b[SegOffset:1])
-					if err == nil {
-						if hint&(HINT_OOB) != 0 {
-							err = SendWithOption(conn, b[1:3], b[3:4], 0, 0)
-						} else {
+					if hint&(HINT_OOB) != 0 {
+						if err = SendWithOption(conn, b[0:offset], oob, 0, 0); err == nil {
+							time.Sleep(80 * time.Millisecond)
+							err = SendWithOption(conn, b[offset:offset+2], oob, 0, 0)
+							time.Sleep(80 * time.Millisecond)
+						}
+						SegOffset += offset+2
+					} else {
+						if _, err = conn.Write(b[0:1]); err == nil {	
 							_, err = conn.Write(b[1:4])
 						}
 						SegOffset += 4
 					}
+				} else if hint&(HINT_OOB) != 0 {
+					err = SendWithOption(conn, b[0:offset], oob, 0, 0)
+					SegOffset += offset
+					time.Sleep(80 * time.Millisecond)
 				}
 
 				if hint&(HINT_OOB) != 0 {
-					oob := []byte{0}
 					cut := offset + length/2
 					if cut > 4 && hint&HINT_OOB != 0 {
 						err = SendWithOption(conn, b[SegOffset:cut], oob, 0, 0)
