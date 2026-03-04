@@ -157,9 +157,8 @@ func (outbound *Outbound) dial(host string, port int, b []byte, offset int, leng
 						SegOffset += 4
 					}
 				} else if hint&(HINT_OOB) != 0 {
-					err = SendWithOption(conn, b[0:offset], oob, 0, 0)
-					SegOffset += offset
-					time.Sleep(80 * time.Millisecond)
+					err = SendWithOption(conn, b[0:offset], b[offset:offset+1], 0, 0)
+					SegOffset += offset + 1
 				}
 
 				if hint&(HINT_OOB) != 0 {
