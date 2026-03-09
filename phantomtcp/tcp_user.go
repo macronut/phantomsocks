@@ -104,7 +104,7 @@ func (outbound *Outbound) dial(host string, port int, header []byte, offset int,
 		TFOLen := headerLen
 		if hint&(HINT_TCPFRAG) != 0 {
 			TFOLen = offset + length/2
-		} 
+		}
 
 		if TFOLen > 1220 {
 			TFOLen = 1220
@@ -179,6 +179,9 @@ func (outbound *Outbound) dial(host string, port int, header []byte, offset int,
 		return conn, nil, err
 	} else {
 		proxyConn, err := outbound.ProxyHandshake(conn, nil, host, port)
+		if err == nil {
+			_, err = conn.Write(header)
+		}
 		return proxyConn, nil, err
 	}
 }
