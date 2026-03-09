@@ -39,7 +39,7 @@ var HintMap = map[string]uint32{
 	"keep-alive": HINT_KEEPALIVE,
 }
 
-func (outbound *Outbound) dial(host string, port int, b []byte, offset int, length int) (net.Conn, *ConnectionInfo, error) {
+func (outbound *Outbound) dial(host string, port int, header []byte, offset int, length int) (net.Conn, *ConnectionInfo, error) {
 	var conn net.Conn
 	raddrs, err := outbound.GetRemoteAddresses(host, port)
 	if err != nil {
@@ -51,11 +51,14 @@ func (outbound *Outbound) dial(host string, port int, b []byte, offset int, leng
 	tfo := hint&HINT_TFO != 0
 	keepalive := hint&HINT_KEEPALIVE != 0
 	timeout := time.Millisecond * time.Duration(outbound.Timeout)
+	headerLen := len(header)
 
 	var raddr *net.TCPAddr = nil
 	var laddr *net.TCPAddr = nil
-	for i := 0; i < len(raddrs); i++ {
-		raddr = raddrs[mathrand.Intn(len(raddrs))]
+	raddr_index := mathrand.Intn(len(raddrs))
+	raddrs_len := len(raddrs)
+	for i := 0; i < raddrs_len; i++ {
+		raddr = raddrs[(i + raddr_index) % raddrs_len]
 		if device != "" {
 			if laddr, err = GetLocalTCPAddr(device, raddr.IP.To4() == nil); err != nil {
 				return nil, nil, err
@@ -67,13 +70,13 @@ func (outbound *Outbound) dial(host string, port int, b []byte, offset int, leng
 			break
 		}
 	}
-	
+
 	if err != nil {
 		return nil, nil, err
 	}
 
 	if hint&HINT_TLS1_3 != 0 {
-		b[2] = 0x4
+		header[2] = 0x4
 	}
 
 	if tfo {
@@ -98,7 +101,7 @@ func (outbound *Outbound) dial(host string, port int, b []byte, offset int, leng
 			}
 		}
 		
-		TFOLen := len(b)
+		TFOLen := headerLen
 		if hint&(HINT_TCPFRAG) != 0 {
 			TFOLen = offset + length/2
 		} 
@@ -107,79 +110,75 @@ func (outbound *Outbound) dial(host string, port int, b []byte, offset int, leng
 			TFOLen = 1220
 		}
 
-		if _, err = conn.Write(b[:TFOLen]); err != nil {
+		if _, err = conn.Write(header[:TFOLen]); err != nil {
 			conn.Close()
 			return nil, nil, err
 		}
 
-		if TFOLen < len(b) {
-			_, err = conn.Write(b[TFOLen:])
+		if TFOLen < headerLen {
+			_, err = conn.Write(header[TFOLen:])
+		}
+
+		return conn, nil, err
+	} else if hint&(HINT_OOB) != 0 {
+		SegOffset := 0
+		cut := offset + length/2
+		if hint&(HINT_TTL) != 0 {
+			oob := []byte{0}
+			err = SendWithOption(conn, header[:offset], header[offset:offset+1], 0, int(outbound.TTL))
+			err = SendWithOption(conn, header[offset+1:cut], oob, 0, 64)
+			SegOffset = cut
+		} else if hint&(HINT_TCPFRAG) != 0 {
+			oob := [2]byte{header[offset], 0}
+			_, err = conn.Write(header[:1])
+			time.Sleep(time.Millisecond)
+			err = SendWithOption(conn, header[1:offset], oob[:], 0, 0)
+			SegOffset = offset + 1
+		} else {
+			oob := [2]byte{header[2], 0}
+			err = SendWithOption(conn, header[:2], oob[:], 0, 0)
+			SegOffset = 3
+		}
+
+		if err == nil {
+			_, err = conn.Write(header[SegOffset:])
 		}
 
 		return conn, nil, err
 	} else if hint & (HINT_TTL|HINT_WMD5) != 0 {
-		fakepayload, cut := outbound.GetFakePayload(b, offset, length) 
+		fakepayload, cut := outbound.GetFakePayload(header, offset, length) 
 		fakepaylen := len(fakepayload)
 		if fakepaylen > cut {
 			fakepaylen = cut
 		}
 
-		if err = outbound.SendWithFakePayload(conn, fakepayload[:fakepaylen], b[:fakepaylen]); err != nil {
+		if err = outbound.SendWithFakePayload(conn, fakepayload[:fakepaylen], header[:fakepaylen]); err != nil {
 			conn.Close()
 			return nil, nil, err
 		}
 
-		if fakepaylen < len(b) {
-			_, err = conn.Write(b[fakepaylen:])
+		if fakepaylen < headerLen {
+			_, err = conn.Write(header[fakepaylen:])
+		}
+
+		return conn, nil, err
+	} else if hint&(HINT_TCPFRAG) != 0 {
+		SegOffset := 0
+		cut := offset + length/2
+		if cut > 4 {
+			if _, err = conn.Write(header[:1]); err == nil {	
+				_, err = conn.Write(header[1:4])
+			}
+			SegOffset += 4
+		}
+
+		if err == nil {
+			_, err = conn.Write(header[SegOffset:])
 		}
 
 		return conn, nil, err
 	} else {
 		proxyConn, err := outbound.ProxyHandshake(conn, nil, host, port)
-
-		if err == nil && b != nil {
-			SegOffset := 0
-			cut := offset + length/2
-			oob := []byte{0}
-			if cut > 4 {
-				if hint&(HINT_TCPFRAG) != 0 {
-					if hint&(HINT_OOB) != 0 {
-						if err = SendWithOption(conn, b[0:offset], oob, 0, 0); err == nil {
-							time.Sleep(80 * time.Millisecond)
-							err = SendWithOption(conn, b[offset:offset+2], oob, 0, 0)
-							time.Sleep(80 * time.Millisecond)
-						}
-						SegOffset += offset+2
-					} else {
-						if _, err = conn.Write(b[0:1]); err == nil {	
-							_, err = conn.Write(b[1:4])
-						}
-						SegOffset += 4
-					}
-				} else if hint&(HINT_OOB) != 0 {
-					err = SendWithOption(conn, b[0:offset], b[offset:offset+1], 0, 0)
-					SegOffset += offset + 1
-				}
-
-				if hint&(HINT_OOB) != 0 {
-					cut := offset + length/2
-					if cut > 4 && hint&HINT_OOB != 0 {
-						err = SendWithOption(conn, b[SegOffset:cut], oob, 0, 0)
-						SegOffset = cut
-					}
-				}
-			}
-
-			if err == nil {
-				_, err = conn.Write(b[SegOffset:])
-			}
-		}
-
-		if err != nil {
-			conn.Close()
-			return nil, nil, err
-		}
-
 		return proxyConn, nil, err
 	}
 }

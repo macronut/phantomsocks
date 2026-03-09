@@ -162,6 +162,9 @@ func SendWithOption(conn net.Conn, payload, oob []byte, tos int, ttl int) error 
 	}
 	defer f.Close()
 	fd := int(f.Fd())
+
+	syscall.SetNonblock(fd, true)
+
 	if tos != 0 {
 		err = syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_TOS, tos)
 		if err != nil {
@@ -181,6 +184,9 @@ func SendWithOption(conn net.Conn, payload, oob []byte, tos int, ttl int) error 
 		copy(buf, payload)
 		buf[len(payload)] = oob[0]
 		err = syscall.Sendto(fd, buf, syscall.MSG_OOB, nil)
+		if len(oob) > 1 {
+			err = syscall.Sendto(fd, oob[1:2], syscall.MSG_OOB, nil)
+		}
 	} else {
 		_, err = conn.Write(payload)
 	}
