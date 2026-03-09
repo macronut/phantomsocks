@@ -180,7 +180,7 @@ func (outbound *Outbound) dial(host string, port int, header []byte, offset int,
 	} else {
 		proxyConn, err := outbound.ProxyHandshake(conn, nil, host, port)
 		if err == nil {
-			_, err = conn.Write(header)
+			_, err = proxyConn.Write(header)
 		}
 		return proxyConn, nil, err
 	}
