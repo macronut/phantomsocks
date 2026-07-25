@@ -1,7 +1,6 @@
 package phantomtcp
 
 import (
-	"bytes"
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
@@ -80,50 +79,6 @@ func GetHeader(conn net.Conn) ([]byte, error) {
 	}
 
 	return buf[:n], err
-}
-
-func HTTPProxy(client net.Conn) {
-	defer client.Close()
-
-	var b [1500]byte
-	n, err := client.Read(b[:])
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	request := b[:n]
-	var method, host string
-	var port int
-
-	end := bytes.IndexByte(request, '\n')
-	if end < 0 {
-		return
-	}
-
-	fmt.Sscanf(string(request[:end]), "%s%s", &method, &host)
-	host, port = splitHostPort(host)
-	if port == 0 {
-		port = 80
-	}
-
-	if method == "CONNECT" {
-		fmt.Fprint(client, "HTTP/1.1 200 Connection established\r\n\r\n")
-		tcp_redirect(client, &net.TCPAddr{Port: port}, host, nil)
-		return
-	} else {
-		if strings.HasPrefix(host, "http://") {
-			host = host[7:]
-			index := strings.IndexByte(host, '/')
-			if index != -1 {
-				host = host[:index]
-			}
-			request = bytes.Replace(b[:n], []byte("http://"+host), nil, 1)
-			HttpMove(client, "https", request)
-		} else {
-			return
-		}
-	}
 }
 
 func SNIProxy(client net.Conn) {
