@@ -100,7 +100,7 @@ func hkdfExpandLabel(secret []byte, label string, length int) []byte {
 	info = append(info, 0)
 
 	out := make([]byte, length)
-	var counter byte = 1
+	counter := byte(1)
 	var generated int
 	var block []byte
 	for generated < length {
@@ -275,36 +275,36 @@ func quicNonce(iv []byte, pn uint64) []byte {
 	return nonce
 }
 
-func decryptInitial(data []byte, key, iv, hp []byte) (plaintext []byte, pn uint64, pnOffset, pnLen int, err error) {
+func decryptInitial(data []byte, key, iv, hp []byte) (plaintext []byte, pn uint64, err error) {
 	pkt, err := parseInitialPacket(data)
 	if err != nil {
-		return nil, 0, 0, 0, err
+		return nil, 0, err
 	}
 	packet := append([]byte(nil), data...)
-	pnLen, err = removeHeaderProtection(packet, pkt.pnOffset, hp)
+	pnLen, err := removeHeaderProtection(packet, pkt.pnOffset, hp)
 	if err != nil {
-		return nil, 0, 0, 0, err
+		return nil, 0, err
 	}
 	headerEnd := pkt.pnOffset + pnLen
 	if headerEnd+pkt.payloadLen-pnLen > len(packet) {
-		return nil, 0, 0, 0, errors.New("short ciphertext")
+		return nil, 0, errors.New("short ciphertext")
 	}
 	pn = decodePacketNumber(packet, pkt.pnOffset, pnLen, 0)
 	aad := packet[:headerEnd]
 	ciphertext := packet[headerEnd : pkt.pnOffset+pkt.payloadLen]
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return nil, 0, 0, 0, err
+		return nil, 0, err
 	}
 	aead, err := cipher.NewGCM(block)
 	if err != nil {
-		return nil, 0, 0, 0, err
+		return nil, 0, err
 	}
 	plaintext, err = aead.Open(nil, quicNonce(iv, pn), ciphertext, aad)
 	if err != nil {
-		return nil, 0, 0, 0, err
+		return nil, 0, err
 	}
-	return plaintext, pn, pkt.pnOffset, pnLen, nil
+	return plaintext, pn, nil
 }
 
 func encryptInitial(version uint32, dcid, scid, token []byte, pn uint64, plaintext []byte, key, iv, hp []byte) ([]byte, error) {
@@ -408,14 +408,6 @@ func extractCryptoStream(frames []byte) ([]byte, error) {
 	return stream, nil
 }
 
-func findSNISplitPoint(clientHello []byte) (int, bool) {
-	start, length, ok := sniHostNameRange(clientHello)
-	if !ok || length <= 1 {
-		return 0, false
-	}
-	return start + length/2, true
-}
-
 func sniHostNameRange(clientHello []byte) (start, length int, ok bool) {
 	if len(clientHello) < 4 || clientHello[0] != 0x01 {
 		return 0, 0, false
@@ -477,7 +469,7 @@ func getIETFQUICSNI(b []byte) string {
 	if !ok {
 		return ""
 	}
-	plain, _, _, _, err := decryptInitial(b, key, iv, hp)
+	plain, _, err := decryptInitial(b, key, iv, hp)
 	if err != nil {
 		return ""
 	}
@@ -584,61 +576,75 @@ func GetQUICSNI(b []byte) string {
 	return ""
 }
 
-func buildSplitCryptoFrames(stream []byte, split int) []byte {
-	var frames []byte
-	frames = append(frames, 0x06)
-	frames = append(frames, writeVarint(0)...)
-	frames = append(frames, writeVarint(uint64(split))...)
-	frames = append(frames, stream[:split]...)
-	frames = append(frames, 0x06)
-	frames = append(frames, writeVarint(uint64(split))...)
-	frames = append(frames, writeVarint(uint64(len(stream)-split))...)
-	frames = append(frames, stream[split:]...)
-	return frames
+func buildCryptoFrame(offset uint64, data []byte) []byte {
+	var frame []byte
+	frame = append(frame, 0x06)
+	frame = append(frame, writeVarint(offset)...)
+	frame = append(frame, writeVarint(uint64(len(data)))...)
+	frame = append(frame, data...)
+	return frame
 }
 
-func FragmentQUICInitial(data []byte) ([]byte, bool) {
+func FragmentQUICInitial(data []byte) [][]byte {
+	pkts := [][]byte{data}
 	if GetQUICVersion(data) == 0 {
-		return data, false
+		return pkts
 	}
 	pkt, err := parseInitialPacket(data)
 	if err != nil {
-		return data, false
+		return pkts
 	}
 	key, iv, hp, ok := quicInitialSecrets(pkt.version, pkt.dcid)
 	if !ok {
-		return data, false
+		return pkts
 	}
-	plaintext, pn, _, _, err := decryptInitial(data, key, iv, hp)
+	plaintext, pn, err := decryptInitial(data, key, iv, hp)
 	if err != nil {
-		return data, false
+		return pkts
 	}
 	if countCryptoFrames(plaintext) >= 2 {
-		return data, false
+		return pkts
 	}
 	stream, err := extractCryptoStream(plaintext)
 	if err != nil {
-		return data, false
+		return pkts
 	}
-	split, ok := findSNISplitPoint(stream)
-	if !ok || split <= 0 || split >= len(stream) {
-		return data, false
+	start, length, ok := sniHostNameRange(stream)
+	if !ok || length <= 1 {
+		return pkts
 	}
-	newFrames := buildSplitCryptoFrames(stream, split)
-	out, err := encryptInitial(pkt.version, pkt.dcid, pkt.scid, pkt.token, pn, newFrames, key, iv, hp)
+	split := start + length/2
+	if split <= 0 || split >= len(stream) {
+		return pkts
+	}
+	first, err := encryptInitial(pkt.version, pkt.dcid, pkt.scid, pkt.token, pn, buildCryptoFrame(0, stream[:split]), key, iv, hp)
 	if err != nil {
-		return data, false
+		return pkts
 	}
-	return out, true
+	second, err := encryptInitial(pkt.version, pkt.dcid, pkt.scid, pkt.token, pn+1, buildCryptoFrame(uint64(split), stream[split:]), key, iv, hp)
+	if err != nil {
+		return pkts
+	}
+	return [][]byte{first, second}
 }
 
 func WriteQUICInitial(conn net.Conn, data []byte, outbound *Outbound) error {
+	pkts := [][]byte{data}
 	if outbound != nil && outbound.Hint&HINT_HTTP3 != 0 && GetQUICVersion(data) != 0 {
-		if out, ok := FragmentQUICInitial(data); ok {
-			_, err := conn.Write(out)
+		pkts = FragmentQUICInitial(data)
+	}
+	if outbound != nil && outbound.Hint&HINT_REVERSE != 0 {
+		for i := len(pkts) - 1; i >= 0; i-- {
+			if _, err := conn.Write(pkts[i]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, pkt := range pkts {
+		if _, err := conn.Write(pkt); err != nil {
 			return err
 		}
 	}
-	_, err := conn.Write(data)
-	return err
+	return nil
 }
