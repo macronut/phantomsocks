@@ -207,13 +207,10 @@ func TProxyUDP(address string) {
 			continue
 		}
 
-		remoteConn, proxyConn, err := outbound.DialUDPProxy(host, dstAddr.Port)
+		remoteConn, err := outbound.DialUDPProxy(host, dstAddr.Port)
 		if err != nil {
 			logPrintln(1, err)
 			localConn.Close()
-			if proxyConn != nil {
-				proxyConn.Close()
-			}
 			continue
 		}
 
@@ -223,9 +220,7 @@ func TProxyUDP(address string) {
 			if err != nil {
 				logPrintln(1, err)
 				localConn.Close()
-				if proxyConn != nil {
-					proxyConn.Close()
-				}
+				remoteConn.Close()
 				continue
 			}
 		}
@@ -234,19 +229,14 @@ func TProxyUDP(address string) {
 		if err != nil {
 			logPrintln(1, err)
 			localConn.Close()
-			if proxyConn != nil {
-				proxyConn.Close()
-			}
+			remoteConn.Close()
 			continue
 		}
 
-		go func(localConn, remoteConn, proxyConn net.Conn) {
+		go func(localConn, remoteConn net.Conn) {
 			relayUDP(localConn, remoteConn)
 			remoteConn.Close()
 			localConn.Close()
-			if proxyConn != nil {
-				proxyConn.Close()
-			}
-		}(localConn, remoteConn, proxyConn)
+		}(localConn, remoteConn)
 	}
 }
