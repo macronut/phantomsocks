@@ -151,47 +151,11 @@ func ComputeUDPChecksum(buffer []byte) uint16 {
 	return ^uint16(checksum)
 }
 
-func relayUDP(left, right net.Conn) error {
-	ch := make(chan error)
-
-	go func() {
-		data := make([]byte, 1500)
-		for {
-			left.SetReadDeadline(time.Now().Add(time.Minute * 2))
-			n, err := left.Read(data)
-			if err != nil {
-				ch <- err
-				right.SetDeadline(time.Now())
-				left.SetDeadline(time.Now())
-				break
-			}
-			right.Write(data[:n])
-		}
-	}()
-
-	data := make([]byte, 1500)
-	var err error
-	for {
-		right.SetReadDeadline(time.Now().Add(time.Minute * 2))
-		var n int
-		n, err = right.Read(data)
-		if err != nil {
-			right.SetDeadline(time.Now())
-			left.SetDeadline(time.Now())
-			break
-		}
-		left.Write(data[:n])
-	}
-
-	ch_err := <-ch
-	if ch_err != nil {
-		err = ch_err
-	}
-
-	return err
+func (outbound *Outbound) DialUDPProxy(host string, port int) (net.Conn, error) {
+	return outbound.dialUDPProxy(host, port, time.Time{})
 }
 
-func (outbound *Outbound) DialUDPProxy(host string, port int) (net.Conn, error) {
+func (outbound *Outbound) dialUDPProxy(host string, port int, deadline time.Time) (net.Conn, error) {
 	raddrs, err := outbound.GetRemoteAddresses(host, port)
 	if err != nil {
 		return nil, err
@@ -244,8 +208,15 @@ func (outbound *Outbound) DialUDPProxy(host string, port int) (net.Conn, error) 
 			}
 			synpacket.AddTCPSeq(1)
 		} else {
-			tcpConn, err = net.DialTCP("tcp", laddr, raddr)
+			dialer := net.Dialer{LocalAddr: laddr, Deadline: deadline}
+			tcpConn, err = dialer.Dial("tcp", raddr.String())
 			if err != nil {
+				return nil, err
+			}
+		}
+		if !deadline.IsZero() {
+			if err = tcpConn.SetDeadline(deadline); err != nil {
+				tcpConn.Close()
 				return nil, err
 			}
 		}
@@ -334,6 +305,11 @@ func (outbound *Outbound) DialUDPProxy(host string, port int) (net.Conn, error) 
 			return nil, err
 		}
 
+		if err = tcpConn.SetDeadline(time.Time{}); err != nil {
+			udpConn.Close()
+			tcpConn.Close()
+			return nil, err
+		}
 		return newSocksUDPConn(udpConn, tcpConn, host, port), nil
 	}
 

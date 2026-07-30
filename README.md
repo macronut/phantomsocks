@@ -143,6 +143,18 @@ config.json:
         }
     ]
 ```
+### TProxy:
+Linux:
+```
+ip rule add fwmark 1 lookup 100
+ip route add local 0.0.0.0/0 dev lo table 100
+iptables -t mangle -A PREROUTING -p udp -j TPROXY \
+    --on-port 7 --tproxy-mark 0x1/0x1
+```
+UDP sessions are tracked in userspace. Do not use a UDP
+`-m socket --transparent` DIVERT rule, because all requests must reach the
+TProxy listener. IPv6 requires equivalent `ip -6` and `ip6tables` rules.
+
 ### Local Redirect (unsafe):
 ```
 config.json:
