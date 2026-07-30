@@ -44,6 +44,7 @@ func ListenAndServe(addr string, key string, serve func(net.Conn)) {
 		l, err = net.Listen("tcp", addr)
 		if err != nil {
 			fmt.Println("Serve:", err)
+			return
 		}
 	}
 

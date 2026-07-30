@@ -68,7 +68,9 @@ func TCPlookup(request []byte, address string) ([]byte, error) {
 		}
 	}
 	if err != nil {
-		conn.Close()
+		if conn != nil {
+			conn.Close()
+		}
 		return nil, err
 	}
 	defer conn.Close()

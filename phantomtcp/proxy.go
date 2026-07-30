@@ -138,7 +138,7 @@ func RedirectTCP(address string) {
 		if err != nil {
 			conn.Close()
 			logPrintln(1, err)
-			return
+			continue
 		}
 
 		ipv4 := addr.IP.To4()

@@ -764,8 +764,12 @@ func LoadHosts(filename string) error {
 				offset++
 			}
 
+			if records == nil {
+				records = new(DNSRecords)
+			}
+
 			outbound, _ := DefaultProfile.GetOutbound(name)
-			if ok && outbound.Hint != 0 {
+			if outbound != nil && outbound.Hint != 0 {
 				records.Index = AddDNSLie(name, outbound)
 				records.ALPN = outbound.Hint & HINT_DNS
 			}
@@ -780,6 +784,7 @@ func LoadHosts(filename string) error {
 			} else {
 				records.IPv6Hint = &RecordAddresses{0x7FFFFFFFFFFFFFFF, []net.IP{ip}}
 			}
+			DNSCache[name] = records
 		}
 	}
 
