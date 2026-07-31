@@ -13,25 +13,21 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
 
-const maxUDPPacketSize = 65535
-
 func listenTProxyUDP(network string, laddr *net.UDPAddr) (*net.UDPConn, error) {
 	listenConfig := net.ListenConfig{
-		Control: func(_, _ string, rawConn syscall.RawConn) error {
-			var optionErr error
-			if err := rawConn.Control(func(fd uintptr) {
-				sockaddr, err := unix.Getsockname(int(fd))
-				if err != nil {
-					optionErr = err
+		Control: func(_, _ string, c syscall.RawConn) error {
+			var err error
+			if ctlErr := c.Control(func(fd uintptr) {
+				sa, saErr := unix.Getsockname(int(fd))
+				if saErr != nil {
+					err = saErr
 					return
 				}
-
-				switch sockaddr.(type) {
+				switch sa.(type) {
 				case *unix.SockaddrInet4:
 					if err = unix.SetsockoptInt(int(fd), unix.SOL_IP, unix.IP_TRANSPARENT, 1); err == nil {
 						err = unix.SetsockoptInt(int(fd), unix.SOL_IP, unix.IP_RECVORIGDSTADDR, 1)
@@ -41,25 +37,23 @@ func listenTProxyUDP(network string, laddr *net.UDPAddr) (*net.UDPConn, error) {
 						err = unix.SetsockoptInt(int(fd), unix.SOL_IPV6, unix.IPV6_RECVORIGDSTADDR, 1)
 					}
 				default:
-					err = fmt.Errorf("unsupported UDP socket address family")
+					err = fmt.Errorf("unsupported UDP socket family")
 				}
-				optionErr = err
-			}); err != nil {
-				return err
+			}); ctlErr != nil {
+				return ctlErr
 			}
-			return optionErr
+			return err
 		},
 	}
 
-	packetConn, err := listenConfig.ListenPacket(context.Background(), network, laddr.String())
+	pc, err := listenConfig.ListenPacket(context.Background(), network, laddr.String())
 	if err != nil {
 		return nil, err
 	}
-
-	conn, ok := packetConn.(*net.UDPConn)
+	conn, ok := pc.(*net.UDPConn)
 	if !ok {
-		packetConn.Close()
-		return nil, fmt.Errorf("unexpected UDP listener type %T", packetConn)
+		pc.Close()
+		return nil, fmt.Errorf("unexpected UDP listener type %T", pc)
 	}
 	return conn, nil
 }
@@ -79,49 +73,31 @@ func readFromTProxyUDP(conn *net.UDPConn, b []byte) (int, *net.UDPAddr, *net.UDP
 		return 0, nil, nil, err
 	}
 
-	dst, err := parseTProxyUDPOriginalDst(msgs)
+	dst, err := parseOrigDst(msgs)
 	if err != nil {
 		return 0, nil, nil, err
 	}
 	return n, addr, dst, nil
 }
 
-func parseTProxyUDPOriginalDst(msgs []unix.SocketControlMessage) (*net.UDPAddr, error) {
-	var dst *net.UDPAddr
+func parseOrigDst(msgs []unix.SocketControlMessage) (*net.UDPAddr, error) {
 	for _, msg := range msgs {
-		if msg.Header.Level == unix.SOL_IP && msg.Header.Type == unix.IP_RECVORIGDSTADDR {
-			if len(msg.Data) < 8 {
-				return nil, fmt.Errorf("short IPv4 original destination control message")
-			}
-			port := int(binary.BigEndian.Uint16(msg.Data[2:4]))
-			dst = &net.UDPAddr{IP: append(net.IP(nil), msg.Data[4:8]...), Port: port}
-		} else if msg.Header.Level == unix.SOL_IPV6 && msg.Header.Type == unix.IPV6_RECVORIGDSTADDR {
-			if len(msg.Data) < 28 {
-				return nil, fmt.Errorf("short IPv6 original destination control message")
-			}
-			port := int(binary.BigEndian.Uint16(msg.Data[2:4]))
-			scopeID := nativeEndian().Uint32(msg.Data[24:28])
-			dst = &net.UDPAddr{
-				IP:   append(net.IP(nil), msg.Data[8:24]...),
-				Port: port,
-				Zone: zoneName(scopeID),
-			}
+		sa, err := unix.ParseOrigDstAddr(&msg)
+		if err != nil {
+			continue
+		}
+		switch addr := sa.(type) {
+		case *unix.SockaddrInet4:
+			return &net.UDPAddr{IP: net.IP(addr.Addr[:]), Port: addr.Port}, nil
+		case *unix.SockaddrInet6:
+			return &net.UDPAddr{
+				IP:   net.IP(addr.Addr[:]),
+				Port: addr.Port,
+				Zone: zoneName(addr.ZoneId),
+			}, nil
 		}
 	}
-
-	if dst == nil {
-		return nil, fmt.Errorf("unable to obtain original destination")
-	}
-
-	return dst, nil
-}
-
-func nativeEndian() binary.ByteOrder {
-	value := uint16(1)
-	if *(*byte)(unsafe.Pointer(&value)) == 1 {
-		return binary.LittleEndian
-	}
-	return binary.BigEndian
+	return nil, errors.New("no original destination")
 }
 
 func zoneName(zoneID uint32) string {
@@ -135,19 +111,14 @@ func zoneName(zoneID uint32) string {
 	return strconv.FormatUint(uint64(zoneID), 10)
 }
 
-func dialTProxyUDP(laddr, raddr *net.UDPAddr) (*net.UDPConn, error) {
-	rsock, err := udpSockaddr(raddr)
-	if err != nil {
-		return nil, err
-	}
-
+func dialTProxyUDP(laddr *net.UDPAddr) (*net.UDPConn, error) {
 	lsock, err := udpSockaddr(laddr)
 	if err != nil {
 		return nil, err
 	}
 
 	af := unix.AF_INET6
-	if laddr.IP.To4() != nil && raddr.IP.To4() != nil {
+	if laddr.IP.To4() != nil {
 		af = unix.AF_INET
 	}
 
@@ -158,7 +129,7 @@ func dialTProxyUDP(laddr, raddr *net.UDPAddr) (*net.UDPConn, error) {
 
 	if err = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
 		unix.Close(fd)
-		return nil, fmt.Errorf("set SO_REUSEADDR: %w", err)
+		return nil, err
 	}
 	if af == unix.AF_INET6 {
 		err = unix.SetsockoptInt(fd, unix.SOL_IPV6, unix.IPV6_TRANSPARENT, 1)
@@ -167,7 +138,7 @@ func dialTProxyUDP(laddr, raddr *net.UDPAddr) (*net.UDPConn, error) {
 	}
 	if err != nil {
 		unix.Close(fd)
-		return nil, fmt.Errorf("set transparent UDP socket option: %w", err)
+		return nil, err
 	}
 
 	if err = unix.Bind(fd, lsock); err != nil {
@@ -175,12 +146,7 @@ func dialTProxyUDP(laddr, raddr *net.UDPAddr) (*net.UDPConn, error) {
 		return nil, err
 	}
 
-	if err = unix.Connect(fd, rsock); err != nil {
-		unix.Close(fd)
-		return nil, err
-	}
-
-	f := os.NewFile(uintptr(fd), fmt.Sprintf("net-udp-dial-%s", raddr.String()))
+	f := os.NewFile(uintptr(fd), fmt.Sprintf("net-udp-bind-%s", laddr.String()))
 	defer f.Close()
 
 	c, err := net.FileConn(f)
@@ -243,8 +209,8 @@ type tproxyUDPSession struct {
 	key        tproxyUDPSessionKey
 	srcAddr    net.UDPAddr
 	dstAddr    net.UDPAddr
-	host       string
 	outbound   *Outbound
+	rewriter   *quicInitialRewriter
 	upstream   chan []byte
 	relayError chan error
 	done       chan struct{}
@@ -259,26 +225,19 @@ type tproxyUDPSession struct {
 type tproxyUDPSessionManager struct {
 	mu       sync.Mutex
 	sessions map[tproxyUDPSessionKey]*tproxyUDPSession
+	pending  map[tproxyUDPSessionKey]*tproxyPendingSession
 	dialSem  chan struct{}
+}
+
+type tproxyPendingSession struct {
+	srcAddr net.UDPAddr
+	dstAddr net.UDPAddr
+	quicInitialPending
 }
 
 type tproxyUDPSessionKey struct {
 	src netip.AddrPort
 	dst netip.AddrPort
-}
-
-func newTProxyUDPSessionManager() *tproxyUDPSessionManager {
-	return &tproxyUDPSessionManager{
-		sessions: make(map[tproxyUDPSessionKey]*tproxyUDPSession),
-		dialSem:  make(chan struct{}, tproxyUDPMaxDialWorkers),
-	}
-}
-
-func newTProxyUDPSessionKey(srcAddr, dstAddr *net.UDPAddr) tproxyUDPSessionKey {
-	return tproxyUDPSessionKey{
-		src: udpAddrPort(srcAddr),
-		dst: udpAddrPort(dstAddr),
-	}
 }
 
 func udpAddrPort(addr *net.UDPAddr) netip.AddrPort {
@@ -299,19 +258,26 @@ func cloneUDPAddr(addr *net.UDPAddr) net.UDPAddr {
 }
 
 func (manager *tproxyUDPSessionManager) dispatch(srcAddr, dstAddr *net.UDPAddr, data []byte) {
-	key := newTProxyUDPSessionKey(srcAddr, dstAddr)
+	key := tproxyUDPSessionKey{src: udpAddrPort(srcAddr), dst: udpAddrPort(dstAddr)}
 
 	manager.mu.Lock()
 	if session, ok := manager.sessions[key]; ok {
 		manager.mu.Unlock()
 		if !session.enqueue(data) {
-			logPrintln(3, "TProxy(UDP):", srcAddr, "->", dstAddr, "session queue full")
+			logPrintln(3, "TProxy(UDP):", srcAddr, "->", dstAddr, "queue full")
 		}
 		return
 	}
-	if len(manager.sessions) >= tproxyUDPMaxSessions {
+
+	now := time.Now()
+	if pending, ok := manager.pending[key]; ok {
 		manager.mu.Unlock()
-		logPrintln(2, "TProxy(UDP): session limit reached")
+		manager.continuePending(key, pending, data, now)
+		return
+	}
+	if len(manager.sessions)+len(manager.pending) >= tproxyUDPMaxSessions {
+		manager.mu.Unlock()
+		logPrintln(2, "TProxy(UDP): session limit")
 		return
 	}
 
@@ -327,35 +293,125 @@ func (manager *tproxyUDPSessionManager) dispatch(srcAddr, dstAddr *net.UDPAddr, 
 		return
 	}
 
+	if outbound.Hint&HINT_HTTP3 != 0 && isQUICInitialDatagram(data) {
+		manager.pending[key] = &tproxyPendingSession{
+			srcAddr: cloneUDPAddr(srcAddr),
+			dstAddr: cloneUDPAddr(dstAddr),
+		}
+		pending := manager.pending[key]
+		manager.mu.Unlock()
+		manager.continuePending(key, pending, data, now)
+		return
+	}
+
+	datagrams := [][]byte{append([]byte(nil), data...)}
+	if !manager.startSession(key, srcAddr, dstAddr, host, outbound, datagrams) {
+		manager.mu.Unlock()
+		return
+	}
+	manager.mu.Unlock()
+}
+
+func (manager *tproxyUDPSessionManager) continuePending(
+	key tproxyUDPSessionKey,
+	pending *tproxyPendingSession,
+	data []byte,
+	now time.Time,
+) {
+	manager.mu.Lock()
+	if manager.pending[key] != pending {
+		manager.mu.Unlock()
+		return
+	}
+	if pending.expired(now) {
+		delete(manager.pending, key)
+		manager.mu.Unlock()
+		logPrintln(4, "TProxy(UDP): Initial timeout", pending.srcAddr, "->", pending.dstAddr)
+		return
+	}
+
+	sni, err := pending.add(data, now)
+	if err != nil {
+		delete(manager.pending, key)
+		manager.mu.Unlock()
+		logPrintln(4, "TProxy(UDP): Initial collect:", err)
+		return
+	}
+	if pending.overLimit() {
+		delete(manager.pending, key)
+		manager.mu.Unlock()
+		logPrintln(3, "TProxy(UDP): Initial pending limit", pending.srcAddr)
+		return
+	}
+	if sni == "" {
+		n, contiguous := pending.stats()
+		logPrintln(4, "TProxy(UDP): waiting ClientHello", pending.srcAddr, "packets", n, "contiguous", contiguous)
+		manager.mu.Unlock()
+		return
+	}
+
+	datagrams := pending.datagrams()
+	srcAddr := pending.srcAddr
+	dstAddr := pending.dstAddr
+	delete(manager.pending, key)
+
+	host, outbound := getTProxyUDPTarget(&dstAddr)
+	if outbound == nil {
+		manager.mu.Unlock()
+		logPrintln(4, "TProxy(UDP):", srcAddr, "->", dstAddr, "no outbound")
+		return
+	}
+	if !manager.startSession(key, &srcAddr, &dstAddr, host, outbound, datagrams) {
+		manager.mu.Unlock()
+		return
+	}
+	manager.mu.Unlock()
+}
+
+func (manager *tproxyUDPSessionManager) startSession(
+	key tproxyUDPSessionKey,
+	srcAddr, dstAddr *net.UDPAddr,
+	host string,
+	outbound *Outbound,
+	initialDatagrams [][]byte,
+) bool {
+	if len(initialDatagrams) == 0 {
+		return false
+	}
+	if _, ok := manager.sessions[key]; ok {
+		return false
+	}
+	if len(manager.sessions) >= tproxyUDPMaxSessions {
+		logPrintln(2, "TProxy(UDP): session limit")
+		return false
+	}
+
 	session := &tproxyUDPSession{
 		key:        key,
 		srcAddr:    cloneUDPAddr(srcAddr),
 		dstAddr:    cloneUDPAddr(dstAddr),
-		host:       host,
 		outbound:   outbound,
 		upstream:   make(chan []byte, tproxyUDPMaxPending),
 		relayError: make(chan error, 1),
 		done:       make(chan struct{}),
 	}
-	firstPacket := append([]byte(nil), data...)
-	session.upstream <- firstPacket
-	session.queuedSize = len(firstPacket)
+	if outbound.Hint&HINT_HTTP3 != 0 {
+		session.rewriter = &quicInitialRewriter{}
+	}
 	manager.sessions[key] = session
-	manager.mu.Unlock()
-
-	logPrintln(1, "TProxy(UDP):", srcAddr, "->", host, dstAddr.Port, outbound)
-	go manager.run(session)
+	logPrintln(1, "TProxy(UDP):", srcAddr, "->", host, dstAddr.Port, outbound, "initials", len(initialDatagrams))
+	go manager.run(session, host, initialDatagrams)
+	return true
 }
 
 func tproxyUDPAllowed(outbound *Outbound, data []byte) bool {
-	if outbound == nil || outbound.Hint&(HINT_UDP|HINT_HTTP3) == 0 {
+	if outbound == nil {
 		return false
 	}
 	if outbound.Hint&HINT_UDP != 0 {
 		return true
 	}
-	version := GetQUICVersion(data)
-	return version != quicVersionNone && version != quicVersionNotLong
+	return outbound.Hint&HINT_HTTP3 != 0 && isQUICInitialDatagram(data)
 }
 
 func (session *tproxyUDPSession) enqueue(data []byte) bool {
@@ -376,14 +432,6 @@ func (session *tproxyUDPSession) enqueue(data []byte) bool {
 	default:
 		return false
 	}
-}
-
-func (session *tproxyUDPSession) nextPacket() []byte {
-	packet := <-session.upstream
-	session.mu.Lock()
-	session.queuedSize -= len(packet)
-	session.mu.Unlock()
-	return packet
 }
 
 func (manager *tproxyUDPSessionManager) remove(session *tproxyUDPSession) {
@@ -410,27 +458,54 @@ func (manager *tproxyUDPSessionManager) remove(session *tproxyUDPSession) {
 	}
 }
 
-func (manager *tproxyUDPSessionManager) run(session *tproxyUDPSession) {
+func (session *tproxyUDPSession) writeUpstream(packet []byte) error {
+	if session.rewriter != nil {
+		return writeQUICDatagram(session.remoteConn, packet, session.outbound, session.rewriter)
+	}
+	_, err := session.remoteConn.Write(packet)
+	return err
+}
+
+func (session *tproxyUDPSession) flushUpstream() error {
+	for {
+		select {
+		case packet := <-session.upstream:
+			session.mu.Lock()
+			session.queuedSize -= len(packet)
+			session.mu.Unlock()
+			if err := session.writeUpstream(packet); err != nil {
+				return err
+			}
+			if err := session.refreshDeadline(); err != nil {
+				return err
+			}
+		default:
+			return nil
+		}
+	}
+}
+
+func (manager *tproxyUDPSessionManager) run(session *tproxyUDPSession, host string, initialDatagrams [][]byte) {
 	defer manager.remove(session)
 
-	queueTimer := time.NewTimer(tproxyUDPSetupTimeout)
-	defer queueTimer.Stop()
+	timer := time.NewTimer(tproxyUDPSetupTimeout)
+	defer timer.Stop()
 	select {
 	case manager.dialSem <- struct{}{}:
-	case <-queueTimer.C:
-		logPrintln(2, "TProxy(UDP): setup queue timeout:", session.srcAddr, "->", session.dstAddr)
+	case <-timer.C:
+		logPrintln(2, "TProxy(UDP): setup timeout", session.srcAddr, "->", session.dstAddr)
 		return
 	}
 
 	var err error
-	session.localConn, err = dialTProxyUDP(&session.dstAddr, &session.srcAddr)
+	session.localConn, err = dialTProxyUDP(&session.dstAddr)
 	if err != nil {
 		<-manager.dialSem
 		logPrintln(1, err)
 		return
 	}
 	deadline := time.Now().Add(tproxyUDPSetupTimeout)
-	session.remoteConn, err = session.outbound.dialUDPProxy(session.host, session.dstAddr.Port, deadline)
+	session.remoteConn, err = session.outbound.dialUDPProxy(host, session.dstAddr.Port, deadline)
 	if err != nil {
 		<-manager.dialSem
 		logPrintln(1, err)
@@ -446,16 +521,21 @@ func (manager *tproxyUDPSessionManager) run(session *tproxyUDPSession) {
 		}
 	}
 
-	firstPacket := session.nextPacket()
-	if err = WriteQUICInitial(session.remoteConn, firstPacket, session.outbound); err != nil {
+	for _, packet := range initialDatagrams {
+		if err = session.writeUpstream(packet); err != nil {
+			logPrintln(1, err)
+			return
+		}
+	}
+	if err = session.flushUpstream(); err != nil {
+		logPrintln(1, err)
+		return
+	}
+	if err = session.refreshDeadline(); err != nil {
 		logPrintln(1, err)
 		return
 	}
 
-	if err = session.refreshDeadline(); err != nil {
-		logPrintln(2, "TProxy(UDP): set deadline:", err)
-		return
-	}
 	go session.relayReplies()
 
 	for {
@@ -464,17 +544,17 @@ func (manager *tproxyUDPSessionManager) run(session *tproxyUDPSession) {
 			session.mu.Lock()
 			session.queuedSize -= len(packet)
 			session.mu.Unlock()
-			if _, err = session.remoteConn.Write(packet); err != nil {
-				logPrintln(2, "TProxy(UDP): upstream write:", err)
+			if err = session.writeUpstream(packet); err != nil {
+				logPrintln(1, err)
 				return
 			}
 			if err = session.refreshDeadline(); err != nil {
-				logPrintln(2, "TProxy(UDP): set deadline:", err)
+				logPrintln(1, err)
 				return
 			}
 		case err = <-session.relayError:
 			if err != nil {
-				logPrintln(2, "TProxy(UDP): reply relay:", err)
+				logPrintln(1, err)
 			}
 			return
 		}
@@ -486,11 +566,15 @@ func (session *tproxyUDPSession) refreshDeadline() error {
 }
 
 func (session *tproxyUDPSession) relayReplies() {
-	data := make([]byte, maxUDPPacketSize)
+	b := make([]byte, quicUDPPacketSize)
 	for {
-		n, err := session.remoteConn.Read(data)
+		n, err := session.remoteConn.Read(b)
 		if err == nil {
-			_, err = session.localConn.Write(data[:n])
+			reply := b[:n]
+			if session.rewriter != nil {
+				reply = session.rewriter.rewriteServer(reply)
+			}
+			_, err = session.localConn.WriteToUDP(reply, &session.srcAddr)
 		}
 		if err != nil {
 			select {
@@ -510,27 +594,24 @@ func (session *tproxyUDPSession) relayReplies() {
 }
 
 func getTProxyUDPTarget(dstAddr *net.UDPAddr) (string, *Outbound) {
-	if ip4 := dstAddr.IP.To4(); ip4 != nil {
-		if ip4[0] == VirtualAddrPrefix {
-			index := int(binary.BigEndian.Uint16(ip4[2:4]))
-			NoseLock.Lock()
-			if index >= len(Nose) {
-				NoseLock.Unlock()
-				return "", nil
-			}
-			lie := Nose[index]
+	ip := dstAddr.IP
+	if ip4 := ip.To4(); ip4 != nil && ip4[0] == VirtualAddrPrefix {
+		index := int(binary.BigEndian.Uint16(ip4[2:4]))
+		NoseLock.Lock()
+		if index >= len(Nose) {
 			NoseLock.Unlock()
-			return lie.Name, lie.Interface
+			return "", nil
 		}
-		if DefaultProfile == nil {
-			return dstAddr.IP.String(), nil
-		}
-		return dstAddr.IP.String(), DefaultProfile.GetOutboundByIP(dstAddr.IP)
+		lie := Nose[index]
+		NoseLock.Unlock()
+		return lie.Name, lie.Interface
 	}
+
+	host := ip.String()
 	if DefaultProfile == nil {
-		return dstAddr.IP.String(), nil
+		return host, nil
 	}
-	return dstAddr.IP.String(), DefaultProfile.GetOutboundByIP(dstAddr.IP)
+	return host, DefaultProfile.GetOutboundByIP(ip)
 }
 
 func TProxyUDP(address string) {
@@ -539,21 +620,29 @@ func TProxyUDP(address string) {
 		logPrintln(1, err)
 		return
 	}
-	client, err := listenTProxyUDP("udp", laddr)
+	network := "udp4"
+	if laddr.IP != nil && laddr.IP.To4() == nil {
+		network = "udp6"
+	}
+	client, err := listenTProxyUDP(network, laddr)
 	if err != nil {
 		logPrintln(1, err)
 		return
 	}
 	defer client.Close()
 
-	manager := newTProxyUDPSessionManager()
-	data := make([]byte, maxUDPPacketSize)
+	manager := &tproxyUDPSessionManager{
+		sessions: make(map[tproxyUDPSessionKey]*tproxyUDPSession),
+		pending:  make(map[tproxyUDPSessionKey]*tproxyPendingSession),
+		dialSem:  make(chan struct{}, tproxyUDPMaxDialWorkers),
+	}
+	b := make([]byte, quicUDPPacketSize)
 	for {
-		n, srcAddr, dstAddr, err := readFromTProxyUDP(client, data)
+		n, srcAddr, dstAddr, err := readFromTProxyUDP(client, b)
 		if err != nil {
 			logPrintln(1, err)
 			continue
 		}
-		manager.dispatch(srcAddr, dstAddr, data[:n])
+		manager.dispatch(srcAddr, dstAddr, b[:n])
 	}
 }

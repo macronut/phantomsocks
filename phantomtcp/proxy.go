@@ -15,10 +15,6 @@ import (
 	"time"
 )
 
-func ReadAtLeast() {
-
-}
-
 func validOptionalPort(port string) bool {
 	if port == "" {
 		return true
@@ -248,7 +244,7 @@ func tcp_redirect(client net.Conn, addr *net.TCPAddr, domain string, header []by
 
 				retry := 5
 
-				CONNECT:
+			CONNECT:
 				logPrintln(1, "Redirect:", client.RemoteAddr(), "->", domain, port, outbound.Device, time.Since(start_time))
 
 				conn, _, err = outbound.dial(domain, port, header, offset, length)
@@ -268,7 +264,7 @@ func tcp_redirect(client net.Conn, addr *net.TCPAddr, domain string, header []by
 						if os.IsTimeout(err) {
 							conn.Close()
 							goto CONNECT
-						} else if (helloLen > 5 && server_hello[0] == 0x15) {
+						} else if helloLen > 5 && server_hello[0] == 0x15 {
 							alert_ver := binary.BigEndian.Uint16(server_hello[1:3])
 							logPrintln(2, "Alert", GetTLSVersionString(alert_ver))
 							conn.Close()
@@ -285,7 +281,7 @@ func tcp_redirect(client net.Conn, addr *net.TCPAddr, domain string, header []by
 
 					conn.SetReadDeadline(time.Time{})
 				}
-				
+
 				if err != nil {
 					if outbound.Fallback != nil {
 						outbound = outbound.Fallback
@@ -380,6 +376,12 @@ func tcp_redirect(client net.Conn, addr *net.TCPAddr, domain string, header []by
 	}
 }
 
+type quicProxySession struct {
+	conn     net.Conn
+	outbound *Outbound
+	rewriter *quicInitialRewriter
+}
+
 func QUICProxy(address string) {
 	client, err := ListenUDP(address)
 	if err != nil {
@@ -389,8 +391,9 @@ func QUICProxy(address string) {
 	defer client.Close()
 
 	var UDPLock sync.Mutex
-	var UDPMap map[string]net.Conn = make(map[string]net.Conn)
-	data := make([]byte, 1500)
+	var UDPMap map[string]quicProxySession = make(map[string]quicProxySession)
+	var pendingMap map[string]*quicInitialPending = make(map[string]*quicInitialPending)
+	data := make([]byte, quicUDPPacketSize)
 
 	for {
 		n, clientAddr, err := client.ReadFromUDP(data)
@@ -399,23 +402,77 @@ func QUICProxy(address string) {
 			return
 		}
 
+		clientKey := clientAddr.String()
 		UDPLock.Lock()
-		udpConn, ok := UDPMap[clientAddr.String()]
+		session, ok := UDPMap[clientKey]
 		UDPLock.Unlock()
 
 		if ok {
-			udpConn.Write(data[:n])
+			var writeErr error
+			if session.rewriter != nil {
+				writeErr = writeQUICDatagram(session.conn, data[:n], session.outbound, session.rewriter)
+			} else {
+				_, writeErr = session.conn.Write(data[:n])
+			}
+			if writeErr != nil {
+				logPrintln(1, writeErr)
+			}
 		} else {
-			SNI := GetQUICSNI(data[:n])
+			now := time.Now()
+			UDPLock.Lock()
+			pending := pendingMap[clientKey]
+			if pending == nil || pending.expired(now) {
+				if len(pendingMap) >= quicPendingLimit {
+					for key, candidate := range pendingMap {
+						if candidate.expired(now) {
+							delete(pendingMap, key)
+						}
+					}
+				}
+				if len(pendingMap) >= quicPendingLimit {
+					UDPLock.Unlock()
+					logPrintln(3, "[QUIC]", clientKey, "pending session limit reached")
+					continue
+				}
+				pending = &quicInitialPending{}
+				pendingMap[clientKey] = pending
+			}
+			SNI, collectErr := pending.add(data[:n], now)
+			if collectErr != nil {
+				delete(pendingMap, clientKey)
+				UDPLock.Unlock()
+				logPrintln(4, "[QUIC]", clientKey, "unable to collect Initial:", collectErr)
+				continue
+			}
+			if pending.overLimit() {
+				delete(pendingMap, clientKey)
+				UDPLock.Unlock()
+				logPrintln(3, "[QUIC]", clientKey, "pending Initial data limit reached")
+				continue
+			}
+			if SNI == "" {
+				packetCount, contiguous := pending.stats()
+				logPrintln(4, "[QUIC]", clientKey, "waiting for ClientHello", "packets", packetCount,
+					"crypto", len(pending.collector.stream), "contiguous", contiguous)
+				UDPLock.Unlock()
+				continue
+			}
+			datagrams := pending.datagrams()
+			delete(pendingMap, clientKey)
+			UDPLock.Unlock()
+
 			if SNI != "" {
+				if DefaultProfile == nil {
+					continue
+				}
 				outbound, _ := DefaultProfile.GetOutbound(SNI)
-				if outbound.Hint&HINT_UDP == 0 {
+				if outbound == nil || outbound.Hint&HINT_UDP == 0 {
 					continue
 				}
 
 				logPrintln(1, "[QUIC]", clientAddr.String(), SNI)
 
-				udpConn, err = outbound.DialUDPProxy(SNI, 443)
+				udpConn, err := outbound.DialUDPProxy(SNI, 443)
 				if err != nil {
 					logPrintln(1, err)
 					continue
@@ -431,32 +488,56 @@ func QUICProxy(address string) {
 					}
 				}
 
+				var rewriter *quicInitialRewriter
+				if outbound.Hint&HINT_HTTP3 != 0 {
+					rewriter = &quicInitialRewriter{}
+				}
+				session := quicProxySession{conn: udpConn, outbound: outbound, rewriter: rewriter}
 				UDPLock.Lock()
-				UDPMap[clientAddr.String()] = udpConn
+				UDPMap[clientKey] = session
 				UDPLock.Unlock()
 
-				err = WriteQUICInitial(udpConn, data[:n], outbound)
-				if err != nil {
-					logPrintln(1, err)
+				writeFailed := false
+				for _, datagram := range datagrams {
+					if rewriter != nil {
+						err = writeQUICDatagram(udpConn, datagram, outbound, rewriter)
+					} else {
+						_, err = udpConn.Write(datagram)
+					}
+					if err != nil {
+						logPrintln(1, err)
+						writeFailed = true
+						break
+					}
+				}
+				if writeFailed {
+					UDPLock.Lock()
+					delete(UDPMap, clientKey)
+					UDPLock.Unlock()
+					udpConn.Close()
 					continue
 				}
 
-				go func(clientAddr net.UDPAddr, udpConn net.Conn) {
-					data := make([]byte, 1500)
-					udpConn.SetReadDeadline(time.Now().Add(time.Minute * 2))
+				go func(clientAddr net.UDPAddr, session quicProxySession) {
+					data := make([]byte, quicUDPPacketSize)
+					session.conn.SetReadDeadline(time.Now().Add(time.Minute * 2))
 					for {
-						n, err := udpConn.Read(data)
+						n, err := session.conn.Read(data)
 						if err != nil {
 							UDPLock.Lock()
 							delete(UDPMap, clientAddr.String())
 							UDPLock.Unlock()
-							udpConn.Close()
+							session.conn.Close()
 							return
 						}
-						udpConn.SetReadDeadline(time.Now().Add(time.Minute * 2))
-						client.WriteToUDP(data[:n], &clientAddr)
+						session.conn.SetReadDeadline(time.Now().Add(time.Minute * 2))
+						reply := data[:n]
+						if session.rewriter != nil {
+							reply = session.rewriter.rewriteServer(reply)
+						}
+						client.WriteToUDP(reply, &clientAddr)
 					}
-				}(*clientAddr, udpConn)
+				}(*clientAddr, session)
 			}
 		}
 	}

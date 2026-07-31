@@ -165,7 +165,7 @@ func udp_redirect(client net.Conn, bindAddr *net.UDPAddr) error {
 	var domain string
 	var addr net.IP
 	var port int
-	var b [1500]byte
+	b := make([]byte, quicUDPPacketSize+256)
 
 	err := ReadFull(client, b[:3])
 	if err != nil {
@@ -173,6 +173,9 @@ func udp_redirect(client net.Conn, bindAddr *net.UDPAddr) error {
 	}
 	msglen := int(binary.BigEndian.Uint16(b[0:2]))
 	hdrlen := int(b[2])
+	if msglen > quicUDPPacketSize || hdrlen < 4 || hdrlen > len(b) {
+		return nil
+	}
 	if err = ReadFull(client, b[3:hdrlen]); err != nil {
 		return err
 	}
@@ -253,16 +256,25 @@ func udp_redirect(client net.Conn, bindAddr *net.UDPAddr) error {
 		}
 	}
 
-	var msg [1500]byte
+	msg := make([]byte, quicUDPPacketSize+256)
 	copy(msg[:hdrlen], b[:hdrlen])
+	var rewriter *quicInitialRewriter
+	if outbound.Hint&HINT_HTTP3 != 0 {
+		rewriter = &quicInitialRewriter{}
+	}
 	go func() {
 		for {
 			n, err := conn.Read(msg[hdrlen:])
 			if err != nil {
 				return
 			}
-			binary.BigEndian.PutUint16(msg[:], uint16(n))
-			if n, err = client.Write(msg[:hdrlen+n]); err != nil {
+			reply := msg[hdrlen : hdrlen+n]
+			if rewriter != nil {
+				reply = rewriter.rewriteServer(reply)
+			}
+			binary.BigEndian.PutUint16(msg[:], uint16(len(reply)))
+			copy(msg[hdrlen:], reply)
+			if n, err = client.Write(msg[:hdrlen+len(reply)]); err != nil {
 				return
 			}
 		}
@@ -271,7 +283,12 @@ func udp_redirect(client net.Conn, bindAddr *net.UDPAddr) error {
 	if err = ReadFull(client, b[:msglen]); err != nil {
 		return err
 	}
-	if err = WriteQUICInitial(conn, b[:msglen], outbound); err != nil {
+	if rewriter != nil {
+		err = writeQUICDatagram(conn, b[:msglen], outbound, rewriter)
+	} else {
+		_, err = conn.Write(b[:msglen])
+	}
+	if err != nil {
 		return err
 	}
 
@@ -282,24 +299,31 @@ func udp_redirect(client net.Conn, bindAddr *net.UDPAddr) error {
 		}
 		msglen := int(binary.BigEndian.Uint16(b[0:2]))
 		hdrlen := int(b[2])
-		if msglen + hdrlen > 1500 || hdrlen < 4 {
+		if msglen > quicUDPPacketSize || hdrlen > len(b) || hdrlen < 4 {
 			return nil
 		}
 		if err = ReadFull(client, b[3:hdrlen]); err != nil {
 			return err
 		}
-		
+
 		if err = ReadFull(client, b[:msglen]); err != nil {
 			return err
 		}
-		if _, err = conn.Write(b[:msglen]); err != nil {
+		if rewriter != nil {
+			err = writeQUICDatagram(conn, b[:msglen], outbound, rewriter)
+		} else {
+			_, err = conn.Write(b[:msglen])
+		}
+		if err != nil {
 			return err
 		}
 	}
 }
 
 type socksUDPSession struct {
-	conn net.Conn
+	conn     net.Conn
+	outbound *Outbound
+	rewriter *quicInitialRewriter
 	// header echoed back to the client, empty for the socks4 format
 	header []byte
 }
@@ -359,7 +383,7 @@ func SocksUDPProxy(address string) {
 
 	var ConnLock sync.Mutex
 	var ConnMap map[string]socksUDPSession = make(map[string]socksUDPSession)
-	data := make([]byte, 1500)
+	data := make([]byte, quicUDPPacketSize+256)
 
 	for {
 		n, srcAddr, err := local.ReadFromUDP(data)
@@ -413,7 +437,15 @@ func SocksUDPProxy(address string) {
 		session, ok := ConnMap[key]
 		ConnLock.Unlock()
 		if ok {
-			session.conn.Write(data[hdrlen:n])
+			var writeErr error
+			if session.rewriter != nil {
+				writeErr = writeQUICDatagram(session.conn, data[hdrlen:n], session.outbound, session.rewriter)
+			} else {
+				_, writeErr = session.conn.Write(data[hdrlen:n])
+			}
+			if writeErr != nil {
+				logPrintln(1, writeErr)
+			}
 			continue
 		}
 
@@ -443,20 +475,27 @@ func SocksUDPProxy(address string) {
 			}
 		}
 
-		if err = WriteQUICInitial(remoteConn, data[hdrlen:n], outbound); err != nil {
+		var rewriter *quicInitialRewriter
+		if outbound.Hint&HINT_HTTP3 != 0 {
+			rewriter = &quicInitialRewriter{}
+			err = writeQUICDatagram(remoteConn, data[hdrlen:n], outbound, rewriter)
+		} else {
+			_, err = remoteConn.Write(data[hdrlen:n])
+		}
+		if err != nil {
 			logPrintln(1, err)
 			remoteConn.Close()
 			continue
 		}
 
-		session = socksUDPSession{remoteConn, header}
+		session = socksUDPSession{conn: remoteConn, outbound: outbound, rewriter: rewriter, header: header}
 		ConnLock.Lock()
 		ConnMap[key] = session
 		ConnLock.Unlock()
 
 		go func(srcAddr net.UDPAddr, session socksUDPSession, key string) {
 			hdrlen := len(session.header)
-			data := make([]byte, 1500)
+			data := make([]byte, quicUDPPacketSize+256)
 			copy(data, session.header)
 
 			session.conn.SetReadDeadline(time.Now().Add(time.Minute * 2))
@@ -470,7 +509,12 @@ func SocksUDPProxy(address string) {
 					return
 				}
 				session.conn.SetReadDeadline(time.Now().Add(time.Minute * 2))
-				local.WriteToUDP(data[:hdrlen+n], &srcAddr)
+				reply := data[hdrlen : hdrlen+n]
+				if session.rewriter != nil {
+					reply = session.rewriter.rewriteServer(reply)
+				}
+				copy(data[hdrlen:], reply)
+				local.WriteToUDP(data[:hdrlen+len(reply)], &srcAddr)
 			}
 		}(*srcAddr, session, key)
 	}
