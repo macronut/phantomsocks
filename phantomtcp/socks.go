@@ -138,8 +138,7 @@ func SocksProxy(client net.Conn) {
 		// the association lives as long as this connection is held open
 		io.Copy(io.Discard, client)
 	case 5: // UDP IN TCP
-		udpAddr := net.UDPAddr{IP: addr, Port: port}
-		udp_redirect(client, &udpAddr)
+		udp_redirect(client)
 	}
 }
 
@@ -156,165 +155,325 @@ func ReadFull(conn net.Conn, buffer []byte) error {
 	return nil
 }
 
-func udp_redirect(client net.Conn, bindAddr *net.UDPAddr) error {
-	defer client.Close()
+func uotSessionKey(host string, port int) string {
+	return strings.Join([]string{host, strconv.Itoa(port)}, ",")
+}
 
-	var outbound *Outbound = nil
-	srcAddr := client.RemoteAddr()
+func readUoTFrame(conn net.Conn, buf []byte) (header []byte, payload []byte, err error) {
+	if err = ReadFull(conn, buf[:3]); err != nil {
+		return nil, nil, err
+	}
+	msglen := int(binary.BigEndian.Uint16(buf[0:2]))
+	hdrlen := int(buf[2])
+	if msglen > quicUDPPacketSize || hdrlen < 5 || hdrlen > len(buf) {
+		return nil, nil, io.ErrUnexpectedEOF
+	}
+	if err = ReadFull(conn, buf[3:hdrlen]); err != nil {
+		return nil, nil, err
+	}
+	header = append([]byte(nil), buf[:hdrlen]...)
+	payload = make([]byte, msglen)
+	if err = ReadFull(conn, payload); err != nil {
+		return nil, nil, err
+	}
+	return header, payload, nil
+}
 
-	var domain string
+func parseUoTTarget(header []byte) (host string, port int, outbound *Outbound) {
+	if len(header) < 5 {
+		return "", 0, nil
+	}
+	hdrlen := int(header[2])
+	if hdrlen > len(header) {
+		return "", 0, nil
+	}
+
 	var addr net.IP
-	var port int
-	b := make([]byte, quicUDPPacketSize+256)
-
-	err := ReadFull(client, b[:3])
-	if err != nil {
-		return err
-	}
-	msglen := int(binary.BigEndian.Uint16(b[0:2]))
-	hdrlen := int(b[2])
-	if msglen > quicUDPPacketSize || hdrlen < 4 || hdrlen > len(b) {
-		return nil
-	}
-	if err = ReadFull(client, b[3:hdrlen]); err != nil {
-		return err
-	}
-
-	atype := b[3]
-	switch atype {
-	case 0x01: //IPv4
-		addr = net.IP(b[4:8])
-		port = int(binary.BigEndian.Uint16(b[8:10]))
-	case 0x03: //Domain
-		addrLen := b[4]
-		domain = string(b[5 : addrLen+5])
-		port = int(binary.BigEndian.Uint16(b[hdrlen-2:]))
-	case 0x04: //IPv6
-		addr = net.IP(b[4:20])
-		port = int(binary.BigEndian.Uint16(b[20:22]))
+	var domain string
+	switch header[3] {
+	case 0x01: // IPv4
+		if hdrlen < 10 {
+			return "", 0, nil
+		}
+		addr = net.IP(header[4:8])
+		port = int(binary.BigEndian.Uint16(header[8:10]))
+	case 0x03: // Domain
+		addrLen := int(header[4])
+		if hdrlen < 7+addrLen {
+			return "", 0, nil
+		}
+		domain = string(header[5 : 5+addrLen])
+		port = int(binary.BigEndian.Uint16(header[5+addrLen:]))
+	case 0x04: // IPv6
+		if hdrlen < 22 {
+			return "", 0, nil
+		}
+		addr = net.IP(header[4:20])
+		port = int(binary.BigEndian.Uint16(header[20:22]))
 	default:
-		logPrintln(3, "address type", b[0], "not supported from", client.RemoteAddr())
-		return nil
+		return "", 0, nil
 	}
 
-	raddr := net.UDPAddr{IP: addr, Port: port}
-	if domain == "" {
-		switch raddr.IP[0] {
-		case 0x00:
-			index := int(binary.BigEndian.Uint16(raddr.IP[14:16]))
-			if index >= len(Nose) {
-				logPrintln(3, index, "in", raddr.IP, "out of range")
-				return err
-			}
-			domain, outbound = GetDNSLie(index)
-			raddr.IP = nil
-		case VirtualAddrPrefix:
-			index := int(binary.BigEndian.Uint16(raddr.IP[2:4]))
-			if index >= len(Nose) {
-				logPrintln(3, index, "in", raddr.IP, "out of range")
-				return err
-			}
-			domain, outbound = GetDNSLie(index)
-			raddr.IP = nil
-		default:
-			return nil
-		}
-	}
-
+	host, outbound = GetSocksUDPTarget(addr, domain)
 	if outbound == nil {
-		if domain == "" {
-			outbound = DefaultProfile.GetOutboundByIP(raddr.IP)
-		} else {
-			outbound, _ = DefaultProfile.GetOutbound(domain)
+		return "", 0, nil
+	}
+	return host, port, outbound
+}
+
+func writeUoTFrame(conn net.Conn, header []byte, payload []byte, mu *sync.Mutex) error {
+	hdrlen := len(header)
+	frame := make([]byte, hdrlen+len(payload))
+	copy(frame, header)
+	binary.BigEndian.PutUint16(frame[:2], uint16(len(payload)))
+	copy(frame[hdrlen:], payload)
+	if mu != nil {
+		mu.Lock()
+		defer mu.Unlock()
+	}
+	_, err := conn.Write(frame)
+	return err
+}
+
+type uotSession struct {
+	conn     net.Conn
+	outbound *Outbound
+	rewriter *quicInitialRewriter
+	header   []byte
+}
+
+type uotPending struct {
+	quicInitialPending
+	header   []byte
+	dialHost string
+	port     int
+	outbound *Outbound
+}
+
+type uotConn struct {
+	client   net.Conn
+	mu       sync.Mutex
+	sessions map[string]*uotSession
+	pending  map[string]*uotPending
+}
+
+func (state *uotConn) writeUpstream(session *uotSession, payload []byte) error {
+	if session.rewriter != nil {
+		return writeQUICDatagram(session.conn, payload, session.outbound, session.rewriter)
+	}
+	_, err := session.conn.Write(payload)
+	return err
+}
+
+func (state *uotConn) flushInitial(session *uotSession, datagrams [][]byte) error {
+	for _, datagram := range datagrams {
+		if err := state.writeUpstream(session, datagram); err != nil {
+			return err
 		}
 	}
+	return nil
+}
 
-	if outbound.Hint&(HINT_UDP|HINT_HTTP3) == 0 {
+func (state *uotConn) runSession(key string, session *uotSession) {
+	buf := make([]byte, quicUDPPacketSize)
+	defer func() {
+		state.mu.Lock()
+		if cur, ok := state.sessions[key]; ok && cur == session {
+			delete(state.sessions, key)
+		}
+		state.mu.Unlock()
+		session.conn.Close()
+	}()
+
+	session.conn.SetReadDeadline(time.Now().Add(time.Minute * 2))
+	for {
+		n, err := session.conn.Read(buf)
+		if err != nil {
+			return
+		}
+		session.conn.SetReadDeadline(time.Now().Add(time.Minute * 2))
+		reply := buf[:n]
+		if session.rewriter != nil {
+			reply = session.rewriter.rewriteServer(reply)
+		}
+
+		state.mu.Lock()
+		header := append([]byte(nil), session.header...)
+		state.mu.Unlock()
+
+		if err := writeUoTFrame(state.client, header, reply, &state.mu); err != nil {
+			return
+		}
+	}
+}
+
+func (state *uotConn) startSession(key string, header []byte, host string, port int, outbound *Outbound, initialDatagrams [][]byte, srcAddr net.Addr) error {
+	if len(initialDatagrams) == 0 {
 		return nil
 	}
 
-	dialHost := domain
-	if dialHost == "" {
-		if raddr.IP == nil {
-			return nil
-		}
-		dialHost = raddr.IP.String()
+	state.mu.Lock()
+	if _, ok := state.sessions[key]; ok {
+		state.mu.Unlock()
+		return nil
 	}
+	if len(state.sessions)+len(state.pending) >= quicPendingLimit {
+		state.mu.Unlock()
+		logPrintln(3, "Socks(UDP): session limit", srcAddr)
+		return nil
+	}
+	state.mu.Unlock()
 
-	logPrintln(1, "Socks(UDP):", srcAddr, "->", dialHost, port, outbound)
-
-	conn, err := outbound.DialUDPProxy(dialHost, port)
+	conn, err := outbound.DialUDPProxy(host, port)
 	if err != nil {
+		logPrintln(1, err)
 		return err
 	}
-	defer conn.Close()
 
 	if outbound.Hint&HINT_ZERO != 0 {
-		zero_data := make([]byte, 8+rand.Intn(1024))
-		if _, err = conn.Write(zero_data); err != nil {
+		zeroData := make([]byte, 8+rand.Intn(1024))
+		if _, err = conn.Write(zeroData); err != nil {
+			conn.Close()
 			return err
 		}
 	}
 
-	msg := make([]byte, quicUDPPacketSize+256)
-	copy(msg[:hdrlen], b[:hdrlen])
 	var rewriter *quicInitialRewriter
 	if outbound.Hint&HINT_HTTP3 != 0 {
 		rewriter = &quicInitialRewriter{}
 	}
-	go func() {
-		for {
-			n, err := conn.Read(msg[hdrlen:])
-			if err != nil {
-				return
-			}
-			reply := msg[hdrlen : hdrlen+n]
-			if rewriter != nil {
-				reply = rewriter.rewriteServer(reply)
-			}
-			binary.BigEndian.PutUint16(msg[:], uint16(len(reply)))
-			copy(msg[hdrlen:], reply)
-			if n, err = client.Write(msg[:hdrlen+len(reply)]); err != nil {
-				return
-			}
-		}
-	}()
 
-	if err = ReadFull(client, b[:msglen]); err != nil {
+	session := &uotSession{
+		conn:     conn,
+		outbound: outbound,
+		rewriter: rewriter,
+		header:   append([]byte(nil), header...),
+	}
+
+	state.mu.Lock()
+	state.sessions[key] = session
+	state.mu.Unlock()
+
+	go state.runSession(key, session)
+
+	if err = state.flushInitial(session, initialDatagrams); err != nil {
+		state.mu.Lock()
+		if cur, ok := state.sessions[key]; ok && cur == session {
+			delete(state.sessions, key)
+		}
+		state.mu.Unlock()
+		conn.Close()
+		logPrintln(1, err)
 		return err
 	}
-	if rewriter != nil {
-		err = writeQUICDatagram(conn, b[:msglen], outbound, rewriter)
-	} else {
-		_, err = conn.Write(b[:msglen])
+
+	logPrintln(1, "Socks(UDP):", srcAddr, "->", host, port, outbound, "initials", len(initialDatagrams))
+	return nil
+}
+
+func (state *uotConn) continuePending(key string, pending *uotPending, header []byte, payload []byte, now time.Time, srcAddr net.Addr) error {
+	state.mu.Lock()
+	if state.pending[key] != pending {
+		state.mu.Unlock()
+		return nil
 	}
+	if pending.expired(now) {
+		delete(state.pending, key)
+		state.mu.Unlock()
+		logPrintln(4, "Socks(UDP): Initial timeout", srcAddr, "->", pending.dialHost, pending.port)
+		return nil
+	}
+	state.mu.Unlock()
+
+	if !isQUICInitialDatagram(payload) {
+		datagrams := pending.datagrams()
+		datagrams = append(datagrams, append([]byte(nil), payload...))
+		state.mu.Lock()
+		delete(state.pending, key)
+		state.mu.Unlock()
+		return state.startSession(key, header, pending.dialHost, pending.port, pending.outbound, datagrams, srcAddr)
+	}
+
+	datagrams, waiting, err := pending.accumulate(payload, now)
 	if err != nil {
-		return err
+		state.mu.Lock()
+		delete(state.pending, key)
+		state.mu.Unlock()
+		logPrintln(4, "Socks(UDP): Initial collect:", err)
+		return nil
+	}
+	if waiting {
+		packetCount, contiguous := pending.stats()
+		logPrintln(4, "Socks(UDP): waiting ClientHello", srcAddr, "->", pending.dialHost, pending.port,
+			"packets", packetCount, "contiguous", contiguous)
+		return nil
 	}
 
-	for {
-		err := ReadFull(client, b[:3])
-		if err != nil {
-			return err
-		}
-		msglen := int(binary.BigEndian.Uint16(b[0:2]))
-		hdrlen := int(b[2])
-		if msglen > quicUDPPacketSize || hdrlen > len(b) || hdrlen < 4 {
+	state.mu.Lock()
+	delete(state.pending, key)
+	state.mu.Unlock()
+	return state.startSession(key, header, pending.dialHost, pending.port, pending.outbound, datagrams, srcAddr)
+}
+
+func (state *uotConn) handleFrame(header []byte, payload []byte, srcAddr net.Addr) error {
+	host, port, outbound := parseUoTTarget(header)
+	if outbound == nil || outbound.Hint&(HINT_UDP|HINT_HTTP3) == 0 {
+		return nil
+	}
+	key := uotSessionKey(host, port)
+
+	state.mu.Lock()
+	if session, ok := state.sessions[key]; ok {
+		session.header = append([]byte(nil), header...)
+		state.mu.Unlock()
+		return state.writeUpstream(session, payload)
+	}
+
+	now := time.Now()
+	if pending, ok := state.pending[key]; ok {
+		state.mu.Unlock()
+		return state.continuePending(key, pending, header, payload, now, srcAddr)
+	}
+	state.mu.Unlock()
+
+	if outbound.Hint&HINT_HTTP3 != 0 && isQUICInitialDatagram(payload) {
+		state.mu.Lock()
+		if len(state.sessions)+len(state.pending) >= quicPendingLimit {
+			state.mu.Unlock()
+			logPrintln(3, "Socks(UDP): pending session limit", srcAddr)
 			return nil
 		}
-		if err = ReadFull(client, b[3:hdrlen]); err != nil {
-			return err
+		pending := &uotPending{
+			header:   append([]byte(nil), header...),
+			dialHost: host,
+			port:     port,
+			outbound: outbound,
 		}
+		state.pending[key] = pending
+		state.mu.Unlock()
+		return state.continuePending(key, pending, header, payload, now, srcAddr)
+	}
 
-		if err = ReadFull(client, b[:msglen]); err != nil {
+	return state.startSession(key, header, host, port, outbound, [][]byte{append([]byte(nil), payload...)}, srcAddr)
+}
+
+func udp_redirect(client net.Conn) error {
+	defer client.Close()
+
+	state := &uotConn{
+		client:   client,
+		sessions: make(map[string]*uotSession),
+		pending:  make(map[string]*uotPending),
+	}
+	srcAddr := client.RemoteAddr()
+	buf := make([]byte, quicUDPPacketSize+256)
+
+	for {
+		header, payload, err := readUoTFrame(client, buf)
+		if err != nil {
 			return err
 		}
-		if rewriter != nil {
-			err = writeQUICDatagram(conn, b[:msglen], outbound, rewriter)
-		} else {
-			_, err = conn.Write(b[:msglen])
-		}
-		if err != nil {
+		if err = state.handleFrame(header, payload, srcAddr); err != nil {
 			return err
 		}
 	}
@@ -326,6 +485,159 @@ type socksUDPSession struct {
 	rewriter *quicInitialRewriter
 	// header echoed back to the client, empty for the socks4 format
 	header []byte
+}
+
+type socksUDPPending struct {
+	quicInitialPending
+	srcAddr  net.UDPAddr
+	header   []byte
+	host     string
+	port     int
+	outbound *Outbound
+}
+
+func socksUDPWriteUpstream(session *socksUDPSession, payload []byte) error {
+	if session.rewriter != nil {
+		return writeQUICDatagram(session.conn, payload, session.outbound, session.rewriter)
+	}
+	_, err := session.conn.Write(payload)
+	return err
+}
+
+func socksUDPFlushInitial(session *socksUDPSession, datagrams [][]byte) error {
+	for _, datagram := range datagrams {
+		if err := socksUDPWriteUpstream(session, datagram); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func socksUDPRunSession(local *net.UDPConn, srcAddr net.UDPAddr, key string, session socksUDPSession, connLock *sync.Mutex, connMap map[string]socksUDPSession) {
+	hdrlen := len(session.header)
+	data := make([]byte, quicUDPPacketSize+256)
+	copy(data, session.header)
+
+	session.conn.SetReadDeadline(time.Now().Add(time.Minute * 2))
+	for {
+		n, err := session.conn.Read(data[hdrlen:])
+		if err != nil {
+			connLock.Lock()
+			delete(connMap, key)
+			connLock.Unlock()
+			session.conn.Close()
+			return
+		}
+		session.conn.SetReadDeadline(time.Now().Add(time.Minute * 2))
+		reply := data[hdrlen : hdrlen+n]
+		if session.rewriter != nil {
+			reply = session.rewriter.rewriteServer(reply)
+		}
+		copy(data[hdrlen:], reply)
+		local.WriteToUDP(data[:hdrlen+len(reply)], &srcAddr)
+	}
+}
+
+func socksUDPStartSession(local *net.UDPConn, srcAddr net.UDPAddr, key string, header []byte, host string, port int, outbound *Outbound, initialDatagrams [][]byte, connLock *sync.Mutex, connMap map[string]socksUDPSession) {
+	if len(initialDatagrams) == 0 {
+		return
+	}
+
+	connLock.Lock()
+	if _, ok := connMap[key]; ok {
+		connLock.Unlock()
+		return
+	}
+	connLock.Unlock()
+
+	remoteConn, err := outbound.DialUDPProxy(host, port)
+	if err != nil {
+		logPrintln(1, err)
+		return
+	}
+
+	if outbound.Hint&HINT_ZERO != 0 {
+		zeroData := make([]byte, 8+rand.Intn(1024))
+		if _, err = remoteConn.Write(zeroData); err != nil {
+			logPrintln(1, err)
+			remoteConn.Close()
+			return
+		}
+	}
+
+	var rewriter *quicInitialRewriter
+	if outbound.Hint&HINT_HTTP3 != 0 {
+		rewriter = &quicInitialRewriter{}
+	}
+
+	session := socksUDPSession{
+		conn:     remoteConn,
+		outbound: outbound,
+		rewriter: rewriter,
+		header:   append([]byte(nil), header...),
+	}
+
+	connLock.Lock()
+	connMap[key] = session
+	connLock.Unlock()
+
+	go socksUDPRunSession(local, srcAddr, key, session, connLock, connMap)
+
+	if err = socksUDPFlushInitial(&session, initialDatagrams); err != nil {
+		logPrintln(1, err)
+		connLock.Lock()
+		delete(connMap, key)
+		connLock.Unlock()
+		remoteConn.Close()
+		return
+	}
+
+	logPrintln(1, "SocksU:", srcAddr, "->", host, port, outbound, "initials", len(initialDatagrams))
+}
+
+func socksUDPContinuePending(local *net.UDPConn, key string, pending *socksUDPPending, payload []byte, now time.Time, connLock *sync.Mutex, connMap map[string]socksUDPSession, pendingMap map[string]*socksUDPPending) {
+	connLock.Lock()
+	if pendingMap[key] != pending {
+		connLock.Unlock()
+		return
+	}
+	if pending.expired(now) {
+		delete(pendingMap, key)
+		connLock.Unlock()
+		logPrintln(4, "SocksU: Initial timeout", pending.srcAddr, "->", pending.host, pending.port)
+		return
+	}
+	connLock.Unlock()
+
+	if !isQUICInitialDatagram(payload) {
+		datagrams := pending.datagrams()
+		datagrams = append(datagrams, append([]byte(nil), payload...))
+		connLock.Lock()
+		delete(pendingMap, key)
+		connLock.Unlock()
+		socksUDPStartSession(local, pending.srcAddr, key, pending.header, pending.host, pending.port, pending.outbound, datagrams, connLock, connMap)
+		return
+	}
+
+	datagrams, waiting, err := pending.accumulate(payload, now)
+	if err != nil {
+		connLock.Lock()
+		delete(pendingMap, key)
+		connLock.Unlock()
+		logPrintln(4, "SocksU: Initial collect:", err)
+		return
+	}
+	if waiting {
+		packetCount, contiguous := pending.stats()
+		logPrintln(4, "SocksU: waiting ClientHello", pending.srcAddr, "->", pending.host, pending.port,
+			"packets", packetCount, "contiguous", contiguous)
+		return
+	}
+
+	connLock.Lock()
+	delete(pendingMap, key)
+	connLock.Unlock()
+	socksUDPStartSession(local, pending.srcAddr, key, pending.header, pending.host, pending.port, pending.outbound, datagrams, connLock, connMap)
 }
 
 func GetSocksUDPTarget(ip net.IP, host string) (string, *Outbound) {
@@ -383,6 +695,7 @@ func SocksUDPProxy(address string) {
 
 	var ConnLock sync.Mutex
 	var ConnMap map[string]socksUDPSession = make(map[string]socksUDPSession)
+	var pendingMap map[string]*socksUDPPending = make(map[string]*socksUDPPending)
 	data := make([]byte, quicUDPPacketSize+256)
 
 	for {
@@ -432,90 +745,50 @@ func SocksUDPProxy(address string) {
 		}
 
 		key := strings.Join([]string{srcAddr.String(), host, strconv.Itoa(port)}, ",")
+		payload := append([]byte(nil), data[hdrlen:n]...)
 
 		ConnLock.Lock()
 		session, ok := ConnMap[key]
-		ConnLock.Unlock()
 		if ok {
-			var writeErr error
-			if session.rewriter != nil {
-				writeErr = writeQUICDatagram(session.conn, data[hdrlen:n], session.outbound, session.rewriter)
-			} else {
-				_, writeErr = session.conn.Write(data[hdrlen:n])
-			}
-			if writeErr != nil {
+			ConnLock.Unlock()
+			if writeErr := socksUDPWriteUpstream(&session, payload); writeErr != nil {
 				logPrintln(1, writeErr)
 			}
 			continue
 		}
 
+		now := time.Now()
+		if pending, ok := pendingMap[key]; ok {
+			ConnLock.Unlock()
+			socksUDPContinuePending(local, key, pending, payload, now, &ConnLock, ConnMap, pendingMap)
+			continue
+		}
+		ConnLock.Unlock()
+
 		if outbound.Hint&(HINT_UDP|HINT_HTTP3) == 0 {
 			continue
 		}
-		if outbound.Hint&HINT_HTTP3 != 0 {
-			if GetQUICVersion(data[hdrlen:n]) == 0 {
+
+		if outbound.Hint&HINT_HTTP3 != 0 && isQUICInitialDatagram(payload) {
+			ConnLock.Lock()
+			if len(ConnMap)+len(pendingMap) >= quicPendingLimit {
+				ConnLock.Unlock()
+				logPrintln(3, "SocksU: pending session limit", srcAddr)
 				continue
 			}
-		}
-
-		logPrintln(1, "SocksU:", srcAddr, "->", host, port, outbound)
-
-		remoteConn, err := outbound.DialUDPProxy(host, port)
-		if err != nil {
-			logPrintln(1, err)
+			pending := &socksUDPPending{
+				srcAddr:  *srcAddr,
+				header:   append([]byte(nil), header...),
+				host:     host,
+				port:     port,
+				outbound: outbound,
+			}
+			pendingMap[key] = pending
+			ConnLock.Unlock()
+			socksUDPContinuePending(local, key, pending, payload, now, &ConnLock, ConnMap, pendingMap)
 			continue
 		}
 
-		if outbound.Hint&HINT_ZERO != 0 {
-			zero_data := make([]byte, 8+rand.Intn(1024))
-			if _, err = remoteConn.Write(zero_data); err != nil {
-				logPrintln(1, err)
-				remoteConn.Close()
-				continue
-			}
-		}
-
-		var rewriter *quicInitialRewriter
-		if outbound.Hint&HINT_HTTP3 != 0 {
-			rewriter = &quicInitialRewriter{}
-			err = writeQUICDatagram(remoteConn, data[hdrlen:n], outbound, rewriter)
-		} else {
-			_, err = remoteConn.Write(data[hdrlen:n])
-		}
-		if err != nil {
-			logPrintln(1, err)
-			remoteConn.Close()
-			continue
-		}
-
-		session = socksUDPSession{conn: remoteConn, outbound: outbound, rewriter: rewriter, header: header}
-		ConnLock.Lock()
-		ConnMap[key] = session
-		ConnLock.Unlock()
-
-		go func(srcAddr net.UDPAddr, session socksUDPSession, key string) {
-			hdrlen := len(session.header)
-			data := make([]byte, quicUDPPacketSize+256)
-			copy(data, session.header)
-
-			session.conn.SetReadDeadline(time.Now().Add(time.Minute * 2))
-			for {
-				n, err := session.conn.Read(data[hdrlen:])
-				if err != nil {
-					ConnLock.Lock()
-					delete(ConnMap, key)
-					ConnLock.Unlock()
-					session.conn.Close()
-					return
-				}
-				session.conn.SetReadDeadline(time.Now().Add(time.Minute * 2))
-				reply := data[hdrlen : hdrlen+n]
-				if session.rewriter != nil {
-					reply = session.rewriter.rewriteServer(reply)
-				}
-				copy(data[hdrlen:], reply)
-				local.WriteToUDP(data[:hdrlen+len(reply)], &srcAddr)
-			}
-		}(*srcAddr, session, key)
+		socksUDPStartSession(local, *srcAddr, key, header, host, port, outbound, [][]byte{payload}, &ConnLock, ConnMap)
 	}
 }

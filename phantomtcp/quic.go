@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"math/rand"
 	"net"
 	"sort"
 	"sync"
@@ -1172,6 +1173,24 @@ func (pending *quicInitialPending) stats() (packetCount, contiguous int) {
 	return len(pending.packets), len(stream)
 }
 
+func (pending *quicInitialPending) clientHelloReady() bool {
+	stream := contiguousCryptoStream(pending.collector.stream, pending.collector.covered)
+	return clientHelloComplete(stream)
+}
+
+func (pending *quicInitialPending) accumulate(data []byte, now time.Time) (datagrams [][]byte, waiting bool, err error) {
+	if _, err = pending.add(data, now); err != nil {
+		return nil, false, err
+	}
+	if pending.overLimit() {
+		return nil, false, errors.New("QUIC Initial pending data limit reached")
+	}
+	if !pending.clientHelloReady() {
+		return nil, true, nil
+	}
+	return pending.datagrams(), false, nil
+}
+
 func (rewriter *quicInitialRewriter) resetLocked() {
 	rewriter.initialized = false
 	rewriter.version = 0
@@ -1473,4 +1492,173 @@ func FragmentQUICInitial(data []byte) [][]byte {
 
 func WriteQUICInitial(conn net.Conn, data []byte, outbound *Outbound) error {
 	return writeQUICDatagram(conn, data, outbound, &quicInitialRewriter{})
+}
+
+type quicProxySession struct {
+	conn     net.Conn
+	outbound *Outbound
+	rewriter *quicInitialRewriter
+}
+
+func quicProxyWriteUpstream(session *quicProxySession, payload []byte) error {
+	if session.rewriter != nil {
+		return writeQUICDatagram(session.conn, payload, session.outbound, session.rewriter)
+	}
+	_, err := session.conn.Write(payload)
+	return err
+}
+
+func quicProxyFlushInitial(session *quicProxySession, datagrams [][]byte) error {
+	for _, datagram := range datagrams {
+		if err := quicProxyWriteUpstream(session, datagram); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func quicProxyRunSession(client *net.UDPConn, clientAddr *net.UDPAddr, clientKey string, session quicProxySession, connLock *sync.Mutex, connMap map[string]quicProxySession) {
+	buf := make([]byte, quicUDPPacketSize)
+	session.conn.SetReadDeadline(time.Now().Add(time.Minute * 2))
+	for {
+		n, err := session.conn.Read(buf)
+		if err != nil {
+			connLock.Lock()
+			delete(connMap, clientKey)
+			connLock.Unlock()
+			session.conn.Close()
+			return
+		}
+		session.conn.SetReadDeadline(time.Now().Add(time.Minute * 2))
+		reply := buf[:n]
+		if session.rewriter != nil {
+			reply = session.rewriter.rewriteServer(reply)
+		}
+		client.WriteToUDP(reply, clientAddr)
+	}
+}
+
+func QUICProxy(address string) {
+	client, err := ListenUDP(address)
+	if err != nil {
+		logPrintln(1, err)
+		return
+	}
+	defer client.Close()
+
+	var connLock sync.Mutex
+	connMap := make(map[string]quicProxySession)
+	pendingMap := make(map[string]*quicInitialPending)
+	data := make([]byte, quicUDPPacketSize)
+
+	for {
+		n, clientAddr, err := client.ReadFromUDP(data)
+		if err != nil {
+			logPrintln(1, err)
+			return
+		}
+
+		clientKey := clientAddr.String()
+		connLock.Lock()
+		session, ok := connMap[clientKey]
+		connLock.Unlock()
+
+		if ok {
+			if writeErr := quicProxyWriteUpstream(&session, data[:n]); writeErr != nil {
+				logPrintln(1, writeErr)
+			}
+			continue
+		}
+
+		now := time.Now()
+		connLock.Lock()
+		pending := pendingMap[clientKey]
+		if pending == nil || pending.expired(now) {
+			if len(pendingMap) >= quicPendingLimit {
+				for key, candidate := range pendingMap {
+					if candidate.expired(now) {
+						delete(pendingMap, key)
+					}
+				}
+			}
+			if len(pendingMap) >= quicPendingLimit {
+				connLock.Unlock()
+				logPrintln(3, "QUIC:", clientKey, "pending session limit")
+				continue
+			}
+			pending = &quicInitialPending{}
+			pendingMap[clientKey] = pending
+		}
+		sni, collectErr := pending.add(data[:n], now)
+		if collectErr != nil {
+			delete(pendingMap, clientKey)
+			connLock.Unlock()
+			logPrintln(4, "QUIC:", clientKey, "Initial collect:", collectErr)
+			continue
+		}
+		if pending.overLimit() {
+			delete(pendingMap, clientKey)
+			connLock.Unlock()
+			logPrintln(3, "QUIC:", clientKey, "Initial pending limit")
+			continue
+		}
+		if sni == "" {
+			packetCount, contiguous := pending.stats()
+			logPrintln(4, "QUIC:", clientKey, "waiting ClientHello", "packets", packetCount, "contiguous", contiguous)
+			connLock.Unlock()
+			continue
+		}
+		datagrams := pending.datagrams()
+		delete(pendingMap, clientKey)
+		connLock.Unlock()
+
+		if DefaultProfile == nil {
+			continue
+		}
+		outbound, _ := DefaultProfile.GetOutbound(sni)
+		if outbound == nil || outbound.Hint&HINT_UDP == 0 {
+			continue
+		}
+
+		logPrintln(1, "QUIC:", clientAddr, sni)
+
+		remoteConn, err := outbound.DialUDPProxy(sni, 443)
+		if err != nil {
+			logPrintln(1, err)
+			continue
+		}
+
+		if outbound.Hint&HINT_ZERO != 0 {
+			zeroData := make([]byte, 8+rand.Intn(1024))
+			if _, err = remoteConn.Write(zeroData); err != nil {
+				logPrintln(1, err)
+				remoteConn.Close()
+				continue
+			}
+		}
+
+		var rewriter *quicInitialRewriter
+		if outbound.Hint&HINT_HTTP3 != 0 {
+			rewriter = &quicInitialRewriter{}
+		}
+		session = quicProxySession{
+			conn:     remoteConn,
+			outbound: outbound,
+			rewriter: rewriter,
+		}
+		connLock.Lock()
+		connMap[clientKey] = session
+		connLock.Unlock()
+
+		if err = quicProxyFlushInitial(&session, datagrams); err != nil {
+			logPrintln(1, err)
+			connLock.Lock()
+			delete(connMap, clientKey)
+			connLock.Unlock()
+			remoteConn.Close()
+			continue
+		}
+
+		go quicProxyRunSession(client, clientAddr, clientKey, session, &connLock, connMap)
+	}
 }
