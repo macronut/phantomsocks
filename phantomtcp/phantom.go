@@ -190,27 +190,6 @@ func (profile *PhantomProfile) GetOutbound(name string) (*Outbound, int) {
 	return DefaultOutbound, 0
 }
 
-func (profile *PhantomProfile) HasDomainRule(name string) bool {
-	if _, ok := profile.DomainMap[name]; ok {
-		return true
-	}
-
-	offset := 0
-	for i := 0; i < SubdomainDepth; i++ {
-		off := strings.Index(name[offset:], ".")
-		if off == -1 {
-			break
-		}
-		offset += off
-		if _, ok := profile.DomainMap[name[offset:]]; ok {
-			return true
-		}
-		offset++
-	}
-
-	return false
-}
-
 func (profile *PhantomProfile) GetOutboundByIP(ip net.IP) *Outbound {
 	ip4 := ip.To4()
 	if ip4 != nil {
