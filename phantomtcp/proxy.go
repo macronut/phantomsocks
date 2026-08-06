@@ -218,7 +218,13 @@ func tcp_redirect(client net.Conn, addr *net.TCPAddr, domain string, header []by
 					if domain != sni {
 						if ech {
 							logPrintln(2, domain, "tls hello with ECH", sni)
-						} else {
+						} else if DefaultProfile.HasDomainRule(sni) {
+							outbound, _ = DefaultProfile.GetOutbound(sni)
+							if outbound == nil {
+								return
+							}
+							domain = sni
+						} else if addr.IP == nil {
 							outbound, _ = DefaultProfile.GetOutbound(sni)
 							if outbound == nil {
 								return
