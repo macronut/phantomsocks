@@ -608,9 +608,9 @@ func LoadProfile(filename string) error {
 								ip := net.ParseIP(addrs[i])
 								if ip == nil {
 									domain := addrs[i]
-									result, hasCache := DNSCache[addrs[i]]
+									result, hasCache := DNSCache[domain]
 									if hasCache {
-										if records.IPv4Hint != nil {
+										if result.IPv4Hint != nil {
 											if records.IPv4Hint == nil {
 												records.IPv4Hint = new(RecordAddresses)
 											}
@@ -623,7 +623,7 @@ func LoadProfile(filename string) error {
 											records.IPv6Hint.Addresses = append(records.IPv6Hint.Addresses, result.IPv6Hint.Addresses...)
 										}
 									} else {
-										result.CName = domain
+										records.CName = domain
 									}
 								} else {
 									ip4 := ip.To4()
