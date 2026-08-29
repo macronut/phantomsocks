@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/google/gopacket"
@@ -57,6 +59,24 @@ var HintMap = map[string]uint32{
 var ConnWait4 [65536]uint32
 var ConnWait6 [65536]uint32
 var pcapHandle *pcap.Handle
+
+func GetDefaultDev() string {
+	if runtime.GOOS == "linux" {
+		cmd := exec.Command("ip", "r")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			logPrintln(0, err)
+			return ""
+		}
+		for _, line := range strings.Split(string(out), "\n") {
+			route := strings.Fields(line)
+			if len(route) > 4 && route[0] == "default" {
+				return route[4]
+			}
+		}
+	}
+	return ""
+}
 
 func FindDev(name string) string {
 	devices, err := pcap.FindAllDevs()

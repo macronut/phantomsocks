@@ -12,8 +12,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"os/exec"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -900,20 +898,8 @@ func CreateOutbounds(Outbounds []OutboundConfig) []string {
 		OutboundsMap[config.Name] = outbound
 
 		if Hint&HINT_FAKE != 0 {
-			if runtime.GOOS == "linux" && outbound.Device == "" {
-				cmd := exec.Command("ip", "r")
-				out, err := cmd.CombinedOutput()
-				if err != nil {
-					logPrintln(0, err)
-					continue
-				}
-				for _, line := range strings.Split(string(out), "\n") {
-					route := strings.Fields(line)
-					if len(route) > 4 && route[0] == "default" {
-						outbound.Device = route[4]
-						break
-					}
-				}
+			if outbound.Device == "" {
+				outbound.Device = GetDefaultDev()
 			}
 
 			_, ok := OutboundsMap[outbound.Device]

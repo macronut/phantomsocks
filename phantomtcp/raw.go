@@ -54,6 +54,8 @@ var HintMap = map[string]uint32{
 	"zero":       HINT_ZERO,
 }
 
+func GetDefaultDev() string { return "" }
+
 func ConnectionMonitor(devices []string) bool {
 	return false
 }

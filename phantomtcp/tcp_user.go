@@ -212,6 +212,8 @@ var ConnInfo6 [65536]chan *ConnectionInfo
 type ConnectionInfo struct {
 }
 
+func GetDefaultDev() string { return "" }
+
 func ConnectionMonitor(devices []string) bool {
 	return false
 }
