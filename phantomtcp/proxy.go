@@ -8,7 +8,6 @@ import (
 	"log"
 	"math/rand"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -259,13 +258,14 @@ func tcp_redirect(client net.Conn, addr *net.TCPAddr, domain string, header []by
 					}
 
 					if (outbound.Hint&HINT_OOB != 0) && retry > 0 {
-						retry--
-						if os.IsTimeout(err) {
+						if err != nil {
+							retry--
 							conn.Close()
 							goto CONNECT
 						} else if helloLen > 5 && server_hello[0] == 0x15 {
 							alert_ver := binary.BigEndian.Uint16(server_hello[1:3])
 							logPrintln(2, "Alert", GetTLSVersionString(alert_ver))
+							retry--
 							conn.Close()
 							goto CONNECT
 						}
