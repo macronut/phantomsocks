@@ -61,7 +61,8 @@ var ConnWait6 [65536]uint32
 var pcapHandle *pcap.Handle
 
 func GetDefaultDev() string {
-	if runtime.GOOS == "linux" {
+	switch runtime.GOOS {
+	case "linux", "android":
 		cmd := exec.Command("ip", "r")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -72,6 +73,48 @@ func GetDefaultDev() string {
 			route := strings.Fields(line)
 			if len(route) > 4 && route[0] == "default" {
 				return route[4]
+			}
+		}
+	case "windows":
+		out, err := exec.Command("route", "print", "0.0.0.0").CombinedOutput()
+		if err != nil {
+			logPrintln(0, err)
+			return ""
+		}
+		for _, line := range strings.Split(string(out), "\n") {
+			route := strings.Fields(line)
+			if len(route) >= 5 && route[0] == "0.0.0.0" && route[1] == "0.0.0.0" {
+				if name := GetDevFromIP(route[3]); name != "" {
+					return name
+				}
+			}
+		}
+	case "darwin", "freebsd", "openbsd", "netbsd", "dragonfly", "solaris", "illumos":
+		out, err := exec.Command("route", "-n", "get", "default").CombinedOutput()
+		if err != nil {
+			logPrintln(0, err)
+			return ""
+		}
+		for _, line := range strings.Split(string(out), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "interface:") {
+				return strings.TrimSpace(line[len("interface:"):])
+			}
+		}
+	}
+	return ""
+}
+
+func GetDevFromIP(addr string) string {
+	ip := net.ParseIP(addr)
+	if ip4 := ip.To4(); ip4 != nil {
+		ifaces, _ := net.Interfaces()
+		for _, iface := range ifaces {
+			addrs, _ := iface.Addrs()
+			for _, a := range addrs {
+				if n, ok := a.(*net.IPNet); ok && n.IP.To4().Equal(ip4) {
+					return iface.Name
+				}
 			}
 		}
 	}
