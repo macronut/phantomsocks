@@ -769,6 +769,38 @@ func (records *DNSRecords) PackAnswers(qtype int, minttl uint32) (int, []byte) {
 	return 0, nil
 }
 
+func BuildServfail(request []byte) []byte {
+	response := make([]byte, len(request))
+	copy(response, request)
+	response[2] = 0x81
+	response[3] = 0x82
+	return response
+}
+
+func BuildNodata(request []byte, ttl uint32) []byte {
+	length := len(request)
+	response := make([]byte, length+75)
+	copy(response, request)
+	response[2] = 0x81
+	response[3] = 0x80
+	binary.BigEndian.PutUint16(response[8:], 1)
+	copy(response[length:], []byte{
+		0x00, 0x00, 0x06, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x01, 0x61, 0x0c, 0x72, 0x6f,
+		0x6f, 0x74, 0x2d, 0x73, 0x65, 0x72, 0x76, 0x65, 0x72, 0x73, 0x03, 0x6e, 0x65, 0x74, 0x00, 0x05,
+		0x6e, 0x73, 0x74, 0x6c, 0x64, 0x0c, 0x76, 0x65, 0x72, 0x69, 0x73, 0x69, 0x67, 0x6e, 0x2d, 0x67,
+		0x72, 0x73, 0x03, 0x63, 0x6f, 0x6d, 0x00, 0x78, 0xa4, 0x92, 0x64, 0x00, 0x00, 0x07, 0x08, 0x00,
+		0x00, 0x03, 0x84, 0x00, 0x09, 0x3a, 0x80, 0x00, 0x00, 0x00, 0x00})
+	binary.BigEndian.PutUint32(response[length+5:], ttl)
+	binary.BigEndian.PutUint32(response[length+71:], ttl)
+	return response
+}
+
+func BuildNxdomain(request []byte, ttl uint32) []byte {
+	response := BuildNodata(request, ttl)
+	response[3] = 0x83
+	return response
+}
+
 func (records *DNSRecords) BuildResponse(request []byte, qtype int, minttl uint32) []byte {
 	DNSRecordMutex.RLock()
 	defer DNSRecordMutex.RUnlock()
@@ -792,7 +824,7 @@ func (records *DNSRecords) BuildResponse(request []byte, qtype int, minttl uint3
 			length += 2
 			binary.BigEndian.PutUint16(response[6:], 1)
 		case 28:
-			return response[:length]
+			return BuildNodata(request, minttl)
 			/*
 				answer := []byte{0xC0, 0x0C, 0x00, 28,
 					0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x10,
@@ -850,34 +882,18 @@ func (records *DNSRecords) BuildResponse(request []byte, qtype int, minttl uint3
 
 		return response[:length]
 	} else {
-		if records.IPv4Hint == nil && records.IPv6Hint == nil {
-			response := make([]byte, length+75)
-			copy(response, request)
-			response[2] = 0x81
-			response[3] = 0xa3
-			binary.BigEndian.PutUint16(response[6:], 1)
-			copy(response[length:], []byte{
-				0x00, 0x00, 0x06, 0x00, 0x01, 0x00, 0x01, 0x51, 0x6e, 0x00, 0x40, 0x01, 0x61, 0x0c, 0x72, 0x6f,
-				0x6f, 0x74, 0x2d, 0x73, 0x65, 0x72, 0x76, 0x65, 0x72, 0x73, 0x03, 0x6e, 0x65, 0x74, 0x00, 0x05,
-				0x6e, 0x73, 0x74, 0x6c, 0x64, 0x0c, 0x76, 0x65, 0x72, 0x69, 0x73, 0x69, 0x67, 0x6e, 0x2d, 0x67,
-				0x72, 0x73, 0x03, 0x63, 0x6f, 0x6d, 0x00, 0x78, 0xa4, 0x92, 0x64, 0x00, 0x00, 0x07, 0x08, 0x00,
-				0x00, 0x03, 0x84, 0x00, 0x09, 0x3a, 0x80, 0x00, 0x01, 0x51, 0x80})
-			length += 75
-
-			return response[:length]
+		count, answer := records.PackAnswers(qtype, minttl)
+		if count == 0 {
+			return BuildNodata(request, minttl)
 		}
 
-		count, answer := records.PackAnswers(qtype, minttl)
 		response := make([]byte, length+len(answer))
 		copy(response, request)
 		response[2] = 0x81
 		response[3] = 0x80
-
-		if count > 0 {
-			binary.BigEndian.PutUint16(response[6:], uint16(count))
-			copy(response[length:], answer)
-			length += len(answer)
-		}
+		binary.BigEndian.PutUint16(response[6:], uint16(count))
+		copy(response[length:], answer)
+		length += len(answer)
 
 		return response[:length]
 	}
@@ -1235,12 +1251,12 @@ func (outbound *Outbound) NSLookup(name string, qtype uint16) (uint32, []net.IP)
 
 func NSRequest(request []byte, cache bool) (uint32, []byte) {
 	name, qtype, end := GetQName(request)
-	binary.BigEndian.PutUint16(request[10:12], 0)
-	request = request[:end]
 	if name == "" {
 		logPrintln(2, "DNS Segmentation fault")
-		return 0, nil
+		return 0, BuildServfail(request)
 	}
+	binary.BigEndian.PutUint16(request[10:12], 0)
+	request = request[:end]
 
 	var outbound *Outbound
 	var records *DNSRecords
@@ -1315,10 +1331,14 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 		}
 	}
 
+	if outbound.DNS == "" {
+		return 0, BuildNxdomain(request, 86400)
+	}
+
 	u, err := url.Parse(outbound.DNS)
 	if err != nil {
 		logPrintln(1, err)
-		return 0, nil
+		return 0, BuildServfail(request)
 	}
 
 	var options ServerOptions
@@ -1328,9 +1348,9 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 	if u.RawQuery != "" {
 		options = ParseOptions(u.RawQuery)
 		if options.Type == "A" && qtype == 28 {
-			return records.Index, records.BuildResponse(request, qtype, 0)
+			return records.Index, records.BuildResponse(request, qtype, 60)
 		} else if options.Type == "AAAA" && qtype == 1 {
-			return records.Index, records.BuildResponse(request, qtype, 0)
+			return records.Index, records.BuildResponse(request, qtype, 60)
 		}
 	}
 
@@ -1357,12 +1377,12 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 		response, err = TFOlookup(_request, u.Host)
 	default:
 		logPrintln(1, "unknown protocol", u.Scheme)
-		return 0, nil
+		return 0, BuildServfail(request)
 	}
 
 	if err != nil {
 		logPrintln(1, err)
-		return 0, nil
+		return 0, BuildServfail(request)
 	}
 
 	switch _qtype {
