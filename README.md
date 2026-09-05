@@ -28,22 +28,22 @@ Usage of ./phantomsocks:
         {
             "name": "dns",
             "protocol": "dns",
-            "address": "127.0.0.1:5353"
+            "listen": "127.0.0.1:5353"
         },
         {
             "name": "socks",
             "protocol": "socks",
-            "address": "127.0.0.1:1081"
+            "listen": "127.0.0.1:1081"
         },
         {
             "name": "redirect",
             "protocol": "redirect",
-            "address": "0.0.0.0:6"
+            "listen": "0.0.0.0:6"
         },
         {
             "name": "tproxy",
             "protocol": "tproxy",
-            "address": "0.0.0.0:7"
+            "listen": "0.0.0.0:7"
         }
     ],
     "outbounds": [
@@ -92,12 +92,12 @@ config.json:
         {
             "name": "DNS",
             "protocol": "dns",
-            "address": "127.0.0.1:53"
+            "listen": "127.0.0.1:53"
         },
         {
             "name": "Socks",
             "protocol": "socks",
-            "address": "127.0.0.1:1080"
+            "listen": "127.0.0.1:1080"
         }
     ]
 
@@ -108,7 +108,7 @@ config.json:
         {
             "name": "Socks",
             "protocol": "socks",
-            "address": "127.0.0.1:1080"
+            "listen": "127.0.0.1:1080"
         }
     ]
 ```
@@ -122,12 +122,12 @@ config.json:
         {
             "name": "DNS",
             "protocol": "dns",
-            "address": "127.0.0.1:53"
+            "listen": "127.0.0.1:53"
         },
         {
             "name": "Redirect",
             "protocol": "redirect",
-            "address": "0.0.0.0:6"
+            "listen": "0.0.0.0:6"
         }
     ]
 
@@ -139,7 +139,7 @@ config.json:
         {
             "name": "Redirect",
             "protocol": "redirect",
-            "address": "0.0.0.0:6"
+            "listen": "0.0.0.0:6"
         }
     ]
 ```
@@ -164,10 +164,29 @@ config.json:
         {
             "name": "Redirect",
             "protocol": "redirect",
-            "address": "0.0.0.0:443"
+            "listen": "0.0.0.0:443"
         }
     ]
 ```
+### Port Mapping:
+```
+config.json:
+    "inbounds": [
+        {
+            "name": "tcp",
+            "protocol": "tcp",
+            "listen": "127.0.0.1:8080",
+            "address": "192.168.1.1:80,192.168.1.2:80"
+        },
+        {
+            "name": "udp",
+            "protocol": "udp",
+            "listen": "127.0.0.1:53",
+            "address": "8.8.8.8:53"
+        }
+    ]
+```
+
 ### Rules
 ```
   [default]         #domains below will use the config of this interface

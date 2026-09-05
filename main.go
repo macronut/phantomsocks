@@ -180,16 +180,20 @@ func StartService() {
 
 	default_proxy := ""
 	for _, inbound := range ProxyConfig.Inbounds {
+		listen := inbound.Listen
+		if listen == "" {
+			listen = inbound.Address
+		}
 		switch inbound.Protocol {
 		case "dns":
-			fmt.Println("DNS:", inbound.Address)
+			fmt.Println("DNS:", listen)
 			go func(addr string) {
 				err := ptcp.DNSServer(addr)
 				if err != nil {
 					fmt.Println("DNS:", err)
 				}
-			}(inbound.Address)
-			go ListenAndServe(inbound.Address, "", ptcp.DNSTCPServer)
+			}(listen)
+			go ListenAndServe(listen, "", ptcp.DNSTCPServer)
 		case "doh":
 			go func(addr string, certs []string) {
 				fmt.Println("DoH:", addr)
@@ -198,28 +202,28 @@ func StartService() {
 				if err != nil {
 					fmt.Println("DoH:", err)
 				}
-			}(inbound.Address, strings.Split(inbound.PrivateKey, ","))
+			}(listen, strings.Split(inbound.PrivateKey, ","))
 		case "http":
-			fmt.Println("HTTP:", inbound.Address)
-			go ListenAndServe(inbound.Address, inbound.PrivateKey, ptcp.HTTPProxy)
-			default_proxy = "HTTP " + inbound.Address
+			fmt.Println("HTTP:", listen)
+			go ListenAndServe(listen, inbound.PrivateKey, ptcp.HTTPProxy)
+			default_proxy = "HTTP " + listen
 		case "socks5":
 			fallthrough
 		case "socks":
-			fmt.Println("Socks:", inbound.Address)
-			go ListenAndServe(inbound.Address, inbound.PrivateKey, ptcp.SocksProxy)
-			go ptcp.SocksUDPProxy(inbound.Address)
-			default_proxy = strings.ToUpper(inbound.Protocol) + " " + inbound.Address
+			fmt.Println("Socks:", listen)
+			go ListenAndServe(listen, inbound.PrivateKey, ptcp.SocksProxy)
+			go ptcp.SocksUDPProxy(listen)
+			default_proxy = strings.ToUpper(inbound.Protocol) + " " + listen
 		case "redirect":
-			fmt.Println("Redirect:", inbound.Address)
-			go ptcp.RedirectTCP(inbound.Address)
-			go ptcp.RedirectUDP(inbound.Address)
+			fmt.Println("Redirect:", listen)
+			go ptcp.RedirectTCP(listen)
+			go ptcp.RedirectUDP(listen)
 		case "tproxy":
-			fmt.Println("TProxy:", inbound.Address)
-			go ptcp.TProxyTCP(inbound.Address)
-			go ptcp.TProxyUDP(inbound.Address)
+			fmt.Println("TProxy:", listen)
+			go ptcp.TProxyTCP(listen)
+			go ptcp.TProxyUDP(listen)
 		case "tcp":
-			fmt.Println("TCP:", inbound.Address, inbound.Peers[0].Endpoint)
+			fmt.Println("TCP:", inbound.Listen, inbound.Address)
 			var l net.Listener
 			keys := strings.Split(inbound.PrivateKey, ",")
 			if len(keys) == 2 {
@@ -227,34 +231,33 @@ func StartService() {
 				cer, err = tls.LoadX509KeyPair(keys[0], keys[1])
 				if err == nil {
 					config := &tls.Config{Certificates: []tls.Certificate{cer}}
-					l, err = tls.Listen("tcp", inbound.Address, config)
+					l, err = tls.Listen("tcp", inbound.Listen, config)
 				}
 			} else {
-				if inbound.Address[0] == '[' {
-					l, err = net.Listen("tcp6", inbound.Address)
+				if inbound.Listen[0] == '[' {
+					l, err = net.Listen("tcp6", inbound.Listen)
 				} else {
-					l, err = net.Listen("tcp", inbound.Address)
+					l, err = net.Listen("tcp", inbound.Listen)
 				}
 			}
 			if err != nil {
 				log.Println(err)
 				continue
 			}
-
-			go ptcp.TCPMapping(l, inbound.Peers)
+			go ptcp.TCPMapping(l, inbound.Address, inbound.Script)
 		case "udp":
-			go ptcp.UDPMapping(inbound.Address, inbound.Peers[0].Endpoint)
+			go ptcp.UDPMapping(inbound.Listen, inbound.Address)
 		case "pac":
 			if default_proxy != "" {
-				go PACServer(inbound.Address, "", default_proxy)
+				go PACServer(listen, "", default_proxy)
 			}
 		case "reverse":
-			fmt.Println("Reverse:", inbound.Address)
-			go ListenAndServe(inbound.Address, inbound.PrivateKey, ptcp.SNIProxy)
-			go ptcp.QUICProxy(inbound.Address)
+			fmt.Println("Reverse:", listen)
+			go ListenAndServe(listen, inbound.PrivateKey, ptcp.SNIProxy)
+			go ptcp.QUICProxy(listen)
 		case "netcat":
-			fmt.Println("netcat:", inbound.Address)
-			go ListenAndServe(inbound.Address, "", ptcp.Netcat)
+			fmt.Println("netcat:", listen)
+			go ListenAndServe(listen, "", ptcp.Netcat)
 		}
 	}
 

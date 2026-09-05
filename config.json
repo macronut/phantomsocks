@@ -5,7 +5,7 @@
         {
             "name": "Socks",
             "protocol": "socks",
-            "address": "127.0.0.1:1080"
+            "listen": "127.0.0.1:1080"
         }
     ],
     "outbounds": [

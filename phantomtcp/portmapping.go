@@ -139,10 +139,22 @@ func DialTCP(address string, device string) (net.Conn, error) {
 	}
 }
 
+func parseAddresses(list string) []string {
+	var addresses []string
+	for _, addr := range strings.Split(list, ",") {
+		if addr != "" {
+			addresses = append(addresses, addr)
+		}
+	}
+	return addresses
+}
+
 func UDPMapping(Address string, Target string) error {
-	if len(Target) == 0 {
+	addresses := parseAddresses(Target)
+	if len(addresses) == 0 {
 		return nil
 	}
+	Target = addresses[0]
 
 	logPrintln(1, "UDPMapping:", Address, Target)
 
@@ -248,8 +260,13 @@ func UDPMapping(Address string, Target string) error {
 	}
 }
 
-func TCPMapping(Listener net.Listener, Peers []Peer) error {
+func TCPMapping(Listener net.Listener, Address string, Script string) error {
 	defer Listener.Close()
+
+	addresses := parseAddresses(Address)
+	if len(addresses) == 0 {
+		return nil
+	}
 
 	for {
 		client, err := Listener.Accept()
@@ -258,13 +275,13 @@ func TCPMapping(Listener net.Listener, Peers []Peer) error {
 			return err
 		}
 
-		Peer := Peers[rand.Intn(len(Peers))]
+		address := addresses[rand.Intn(len(addresses))]
 
-		logPrintln(3, "[TCP]", client.RemoteAddr().String(), Peer.Endpoint)
+		logPrintln(3, "[TCP]", client.RemoteAddr().String(), address)
 
-		go func() {
-			if Peer.Script != "" {
-				args := strings.Fields(Peer.Script)
+		go func(client net.Conn, address string) {
+			if Script != "" {
+				args := strings.Fields(Script)
 				cmd := exec.Command(args[0])
 				cmd.Args = args
 				out, err := cmd.CombinedOutput()
@@ -274,7 +291,7 @@ func TCPMapping(Listener net.Listener, Peers []Peer) error {
 				}
 			}
 
-			remote, err := net.Dial("tcp", Peer.Endpoint)
+			remote, err := net.Dial("tcp", address)
 			if err != nil {
 				logPrintln(1, err)
 				return
@@ -285,6 +302,6 @@ func TCPMapping(Listener net.Listener, Peers []Peer) error {
 			if err != nil {
 				return
 			}
-		}()
+		}(client, address)
 	}
 }

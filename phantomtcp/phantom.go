@@ -19,15 +19,11 @@ import (
 
 type InboundConfig struct {
 	Name       string `json:"name,omitempty"`
-	Device     string `json:"device,omitempty"`
-	MTU        int    `json:"mtu,omitempty"`
 	Protocol   string `json:"protocol,omitempty"`
-	Method     string `json:"method,omitempty"`
+	Listen     string `json:"listen,omitempty"`
 	Address    string `json:"address,omitempty"`
 	PrivateKey string `json:"privatekey,omitempty"`
-	Interface  string `json:"interface,omitempty"`
-
-	Peers []Peer `json:"peers,omitempty"`
+	Script     string `json:"script,omitempty"`
 }
 
 type OutboundConfig struct {
@@ -44,20 +40,8 @@ type OutboundConfig struct {
 	PublicKey  string `json:"publickey,omitempty"`
 	PrivateKey string `json:"privatekey,omitempty"`
 
-	Peers []Peer `json:"peers,omitempty"`
-
 	Timeout  int    `json:"timeout,omitempty"`
 	Fallback string `json:"fallback,omitempty"`
-}
-
-type Peer struct {
-	Name         string `json:"name,omitempty"`
-	PublicKey    string `json:"publickey,omitempty"`
-	PreSharedKey string `json:"presharedkey,omitempty"`
-	Endpoint     string `json:"endpoint,omitempty"`
-	KeepAlive    int    `json:"keepalive,omitempty"`
-	AllowedIPs   string `json:"allowedips,omitempty"`
-	Script       string `json:"script,omitempty"`
 }
 
 const (
@@ -562,9 +546,6 @@ func LoadProfile(filename string) error {
 							log.Println(string(line), err)
 							return err
 						}
-					} else if keys[0] == "udpmapping" {
-						mapping := strings.SplitN(keys[1], ">", 2)
-						go UDPMapping(mapping[0], mapping[1])
 					} else if strings.HasSuffix(keys[0], "]") {
 						domain_type := strings.SplitN(keys[0][:len(keys[0])-1], "[", 2)
 						if len(domain_type) > 1 {
@@ -934,23 +915,4 @@ func CreateOutbounds(Outbounds []OutboundConfig) []string {
 	
 	go ConnectionMonitor(devices)
 	return devices
-}
-
-func (inbound *InboundConfig) StartService() {
-}
-
-func (outbound *OutboundConfig) StartClient() error {
-	return nil
-}
-
-func (outbound *Outbound) Upgrade(conn net.Conn, host string, port int) (net.Conn, error) {
-	return nil, nil
-}
-
-func (outbound *Outbound) DialTCP(address *net.TCPAddr) (net.Conn, error) {
-	return nil, nil
-}
-
-func (outbound *Outbound) DialUDP(address *net.UDPAddr) (net.Conn, error) {
-	return nil, nil
 }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"math/rand"
 	"net"
-	"strings"
 	"sync"
 	"time"
 )
@@ -314,78 +313,4 @@ func (outbound *Outbound) dialUDPProxy(host string, port int, deadline time.Time
 	}
 
 	return nil, proxy_err
-}
-
-func GetLocalUDPAddr(name string, ipv6 bool) (*net.UDPAddr, error) {
-	if name == "" {
-		return nil, nil
-	}
-
-	inf, err := net.InterfaceByName(name)
-	if err != nil {
-		return nil, err
-	}
-	addrs, _ := inf.Addrs()
-	for _, addr := range addrs {
-		localAddr, ok := addr.(*net.IPNet)
-		if ok {
-			var laddr *net.UDPAddr
-			ip4 := localAddr.IP.To4()
-			if ipv6 {
-				if ip4 != nil || localAddr.IP.IsPrivate() {
-					continue
-				}
-				ip := make([]byte, 16)
-				copy(ip[:16], localAddr.IP)
-				laddr = &net.UDPAddr{IP: ip[:], Port: 0}
-			} else {
-				if ip4 == nil {
-					continue
-				}
-				ip := make([]byte, 4)
-				copy(ip[:4], ip4)
-				laddr = &net.UDPAddr{IP: ip[:], Port: 0}
-			}
-
-			return laddr, nil
-		}
-	}
-
-	return nil, nil
-}
-
-func StartHolePunching(inbound InboundConfig) {
-	network := "udp6"
-	laddr, err := net.ResolveUDPAddr(network, inbound.Address)
-	if err != nil {
-		logPrintln(1, err)
-		return
-	}
-	sport := laddr.Port
-	ipv6 := strings.HasSuffix(network, "6")
-	payload := make([]byte, 4)
-
-	for {
-		if inbound.Device != "" {
-			laddr, err = GetLocalUDPAddr(inbound.Device, ipv6)
-			if err != nil {
-				logPrintln(1, err)
-				continue
-			}
-			laddr.Port = sport
-		}
-
-		for _, peer := range inbound.Peers {
-			raddr, err := net.ResolveUDPAddr(network, peer.Endpoint)
-			if err == nil {
-				err = SendUDPPacket(laddr, raddr, payload, 2)
-				logPrintln(3, network, laddr, raddr)
-			}
-			if err != nil {
-				logPrintln(1, err)
-			}
-		}
-
-		time.Sleep(time.Duration(25 * time.Second))
-	}
 }
