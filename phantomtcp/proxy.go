@@ -571,6 +571,7 @@ func (outbound *Outbound) ProxyHandshake(conn net.Conn, synpacket *ConnectionInf
 	case SOCKS5:
 		{
 			var b [264]byte
+			var n int
 			if synpacket != nil {
 				err := ModifyAndSendPacket(synpacket, b[:], hint, outbound.TTL, 2)
 				if err != nil {
@@ -578,19 +579,10 @@ func (outbound *Outbound) ProxyHandshake(conn net.Conn, synpacket *ConnectionInf
 				}
 			}
 
-			n, err := conn.Write([]byte{0x05, 0x01, 0x00})
-			if err != nil {
-				return conn, err
-			}
-			proxy_seq += uint32(n)
-			_, err = conn.Read(b[:])
-			if err != nil {
-				return conn, err
-			}
-
-			if b[0] != 0x05 {
+			if err = socks5Negotiate(conn, "", ""); err != nil {
 				return nil, proxy_err
 			}
+			proxy_seq += 5
 
 			if outbound.DNS != "" {
 				_, ips := outbound.NSLookup(host, 0)

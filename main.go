@@ -224,27 +224,7 @@ func StartService() {
 			go ptcp.TProxyUDP(listen)
 		case "tcp":
 			fmt.Println("TCP:", inbound.Listen, inbound.Address)
-			var l net.Listener
-			keys := strings.Split(inbound.PrivateKey, ",")
-			if len(keys) == 2 {
-				var cer tls.Certificate
-				cer, err = tls.LoadX509KeyPair(keys[0], keys[1])
-				if err == nil {
-					config := &tls.Config{Certificates: []tls.Certificate{cer}}
-					l, err = tls.Listen("tcp", inbound.Listen, config)
-				}
-			} else {
-				if inbound.Listen[0] == '[' {
-					l, err = net.Listen("tcp6", inbound.Listen)
-				} else {
-					l, err = net.Listen("tcp", inbound.Listen)
-				}
-			}
-			if err != nil {
-				log.Println(err)
-				continue
-			}
-			go ptcp.TCPMapping(l, inbound.Address, inbound.Script)
+			go ptcp.TCPMapping(inbound.Listen, inbound.Address, inbound.Script)
 		case "udp":
 			go ptcp.UDPMapping(inbound.Listen, inbound.Address)
 		case "pac":

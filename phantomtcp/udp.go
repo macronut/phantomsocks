@@ -229,15 +229,7 @@ func (outbound *Outbound) dialUDPProxy(host string, port int, deadline time.Time
 			}
 		}
 
-		if _, err = tcpConn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
-			tcpConn.Close()
-			return nil, err
-		}
-		if err = ReadFull(tcpConn, b[:2]); err != nil {
-			tcpConn.Close()
-			return nil, err
-		}
-		if b[0] != 0x05 || b[1] != 0x00 {
+		if err = socks5Negotiate(tcpConn, "", ""); err != nil {
 			tcpConn.Close()
 			return nil, proxy_err
 		}

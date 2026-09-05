@@ -3,40 +3,555 @@ package phantomtcp
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
 	"math/rand"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 )
 
+// SOCKS5 reply codes (RFC 1928 REP field).
+const (
+	socks5RepSucceeded            byte = 0x00
+	socks5RepGeneralFailure       byte = 0x01
+	socks5RepNotAllowed             byte = 0x02
+	socks5RepNetworkUnreachable     byte = 0x03
+	socks5RepHostUnreachable        byte = 0x04
+	socks5RepConnectionRefused      byte = 0x05
+	socks5RepTTLExpired             byte = 0x06
+	socks5RepCommandNotSupported    byte = 0x07
+	socks5RepAddrTypeNotSupported   byte = 0x08
+)
+
+func socks5ConnectReply() []byte {
+	return socks5AddrReply(socks5RepSucceeded, &net.TCPAddr{IP: net.IPv4zero})
+}
+
 // UDP ASSOCIATE is answered with the address of SocksUDPProxy, which shares the
 // port of the socks inbound the client is already connected to.
-func socks5Reply(cmd byte, client net.Conn) []byte {
-	if cmd != 3 {
-		return []byte{5, 0, 0, 1, 0, 0, 0, 0, 0, 0}
-	}
-
-	addr, ok := client.LocalAddr().(*net.TCPAddr)
+func socks5UDPAssociateReply(client net.Conn) []byte {
+	la, ok := client.LocalAddr().(*net.TCPAddr)
 	if !ok {
-		return []byte{5, 1, 0, 1, 0, 0, 0, 0, 0, 0}
+		return socks5AddrReply(socks5RepGeneralFailure, &net.TCPAddr{})
 	}
+	return socks5AddrReply(socks5RepSucceeded, la)
+}
 
+func socks5HandshakeReply(cmd byte, client net.Conn) []byte {
+	switch cmd {
+	case 1, 5: // CONNECT, UDP IN TCP
+		return socks5ConnectReply()
+	case 3: // UDP ASSOCIATE
+		return socks5UDPAssociateReply(client)
+	case 2: // BIND: first reply is sent by socks5Bind after listen
+		return nil
+	default:
+		la, ok := client.LocalAddr().(*net.TCPAddr)
+		if !ok {
+			la = &net.TCPAddr{}
+		}
+		return socks5AddrReply(socks5RepCommandNotSupported, la)
+	}
+}
+
+func socks5AddrReply(rep byte, addr *net.TCPAddr) []byte {
 	if ip4 := addr.IP.To4(); ip4 != nil {
-		reply := []byte{5, 0, 0, 1, 0, 0, 0, 0, 0, 0}
+		reply := make([]byte, 10)
+		reply[0], reply[1], reply[3] = 5, rep, 1
 		copy(reply[4:8], ip4)
-		binary.BigEndian.PutUint16(reply[8:], uint16(addr.Port))
+		binary.BigEndian.PutUint16(reply[8:10], uint16(addr.Port))
 		return reply
 	}
-
 	reply := make([]byte, 22)
-	reply[0] = 5
-	reply[3] = 4
+	reply[0], reply[1], reply[3] = 5, rep, 4
 	copy(reply[4:20], addr.IP.To16())
-	binary.BigEndian.PutUint16(reply[20:], uint16(addr.Port))
+	binary.BigEndian.PutUint16(reply[20:22], uint16(addr.Port))
 	return reply
+}
+
+func isUnspecifiedIP(ip net.IP) bool {
+	return ip == nil || len(ip) == 0 || ip.IsUnspecified()
+}
+
+func socks5BindRep(err error) byte {
+	if err == nil {
+		return socks5RepSucceeded
+	}
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return socks5RepConnectionRefused
+	}
+	if errors.Is(err, syscall.EADDRNOTAVAIL) {
+		return socks5RepHostUnreachable
+	}
+	if errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) {
+		return socks5RepNotAllowed
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Err != nil {
+		return socks5BindRep(opErr.Err)
+	}
+	return socks5RepGeneralFailure
+}
+
+func bindListenNetwork(la *net.TCPAddr, reqAddr net.IP) string {
+	if !isUnspecifiedIP(reqAddr) {
+		if reqAddr.To4() != nil {
+			return "tcp"
+		}
+		return "tcp6"
+	}
+	if la.IP.To4() != nil {
+		return "tcp"
+	}
+	return "tcp6"
+}
+
+func bindListenAddr(reqAddr net.IP, reqPort int) string {
+	if isUnspecifiedIP(reqAddr) {
+		if reqPort == 0 {
+			return ":0"
+		}
+		return ":" + strconv.Itoa(reqPort)
+	}
+	if reqPort == 0 {
+		return net.JoinHostPort(reqAddr.String(), "0")
+	}
+	return net.JoinHostPort(reqAddr.String(), strconv.Itoa(reqPort))
+}
+
+func bindReplyAddr(la *net.TCPAddr, reqAddr net.IP, listener net.Listener) *net.TCPAddr {
+	bound := listener.Addr().(*net.TCPAddr)
+	if isUnspecifiedIP(reqAddr) {
+		return &net.TCPAddr{IP: la.IP, Port: bound.Port}
+	}
+	return bound
+}
+
+var errBindQueueCanceled = errors.New("bind queue canceled")
+
+type bindWaiter struct {
+	notify chan struct{}
+	done   chan struct{}
+	once   sync.Once
+	wg     sync.WaitGroup
+	popped bool // guarded by bindPortQueue.mu
+}
+
+func (w *bindWaiter) finish() {
+	w.once.Do(func() { close(w.done) })
+}
+
+func (w *bindWaiter) canceled() bool {
+	select {
+	case <-w.done:
+		return true
+	default:
+		return false
+	}
+}
+
+type bindPortQueue struct {
+	key       string
+	mu        sync.Mutex
+	listening bool
+	waiters   []*bindWaiter
+}
+
+var (
+	bindPortQueues   = make(map[string]*bindPortQueue)
+	bindPortQueuesMu sync.Mutex
+)
+
+func bindPortKey(network, addr string) string {
+	return network + "\x00" + addr
+}
+
+func getBindPortQueue(key string) *bindPortQueue {
+	bindPortQueuesMu.Lock()
+	defer bindPortQueuesMu.Unlock()
+	q := bindPortQueues[key]
+	if q == nil {
+		q = &bindPortQueue{key: key}
+		bindPortQueues[key] = q
+	}
+	return q
+}
+
+func maybeDeleteBindQueue(q *bindPortQueue) {
+	q.mu.Lock()
+	empty := !q.listening && len(q.waiters) == 0
+	q.mu.Unlock()
+	if !empty {
+		return
+	}
+
+	bindPortQueuesMu.Lock()
+	if cur := bindPortQueues[q.key]; cur == q {
+		cur.mu.Lock()
+		empty = !cur.listening && len(cur.waiters) == 0
+		cur.mu.Unlock()
+		if empty {
+			delete(bindPortQueues, q.key)
+		}
+	}
+	bindPortQueuesMu.Unlock()
+}
+
+func (q *bindPortQueue) removeWaiter(w *bindWaiter) {
+	q.mu.Lock()
+	for i, x := range q.waiters {
+		if x == w {
+			q.waiters = append(q.waiters[:i], q.waiters[i+1:]...)
+			break
+		}
+	}
+	q.mu.Unlock()
+	maybeDeleteBindQueue(q)
+}
+
+// watchBindControl polls the control connection until stopped returns true,
+// and calls abort once the client closes it or sends data early.
+func watchBindControl(client net.Conn, stopped func() bool, abort func()) {
+	var b [1]byte
+	for !stopped() {
+		if err := client.SetReadDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
+			abort()
+			return
+		}
+		_, err := client.Read(b[:])
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue
+			}
+			abort()
+			return
+		}
+		abort()
+		return
+	}
+}
+
+func acquireBindListener(client net.Conn, network, addr string) (net.Listener, error) {
+	key := bindPortKey(network, addr)
+	for {
+		q := getBindPortQueue(key)
+		q.mu.Lock()
+		if !q.listening {
+			ln, err := net.Listen(network, addr)
+			if err == nil {
+				q.listening = true
+				q.mu.Unlock()
+				return ln, nil
+			}
+			q.mu.Unlock()
+			forwardBindSlot(q)
+			return nil, err
+		}
+
+		w := &bindWaiter{
+			notify: make(chan struct{}, 1),
+			done:   make(chan struct{}),
+		}
+		q.waiters = append(q.waiters, w)
+		q.mu.Unlock()
+
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			watchBindControl(client, w.canceled, func() {
+				q.removeWaiter(w)
+				w.finish()
+			})
+		}()
+
+		select {
+		case <-w.notify:
+			w.finish()
+		case <-w.done:
+			// the slot may have been handed to this waiter concurrently
+			q.mu.Lock()
+			popped := w.popped
+			q.mu.Unlock()
+			if popped {
+				<-w.notify
+				forwardBindSlot(q)
+			}
+			return nil, errBindQueueCanceled
+		}
+
+		// make sure the watcher stopped reading the control connection
+		client.SetReadDeadline(time.Now())
+		w.wg.Wait()
+		client.SetReadDeadline(time.Time{})
+	}
+}
+
+func forwardBindSlot(q *bindPortQueue) {
+	q.mu.Lock()
+	if !q.listening && len(q.waiters) > 0 {
+		w := q.waiters[0]
+		q.waiters = q.waiters[1:]
+		w.popped = true
+		q.mu.Unlock()
+		w.notify <- struct{}{}
+		return
+	}
+	q.mu.Unlock()
+	maybeDeleteBindQueue(q)
+}
+
+func releaseBindListener(network, addr string) {
+	q := getBindPortQueue(bindPortKey(network, addr))
+	q.mu.Lock()
+	q.listening = false
+	q.mu.Unlock()
+	forwardBindSlot(q)
+}
+
+func socks5Bind(client net.Conn, host string, reqAddr net.IP, reqPort int) {
+	la, ok := client.LocalAddr().(*net.TCPAddr)
+	if !ok {
+		client.Write(socks5AddrReply(socks5RepGeneralFailure, &net.TCPAddr{}))
+		return
+	}
+
+	if host != "" {
+		client.Write(socks5AddrReply(socks5RepAddrTypeNotSupported, la))
+		return
+	}
+
+	network := bindListenNetwork(la, reqAddr)
+	bindAddr := bindListenAddr(reqAddr, reqPort)
+	listener, err := acquireBindListener(client, network, bindAddr)
+	if err != nil {
+		if err != errBindQueueCanceled {
+			logPrintln(1, "Socks(BIND):", client.RemoteAddr(), err)
+			client.Write(socks5AddrReply(socks5BindRep(err), la))
+		}
+		return
+	}
+
+	bnd := bindReplyAddr(la, reqAddr, listener)
+
+	if _, err = client.Write(socks5AddrReply(socks5RepSucceeded, bnd)); err != nil {
+		listener.Close()
+		releaseBindListener(network, bindAddr)
+		return
+	}
+	logPrintln(1, "Socks(BIND):", client.RemoteAddr(), "->", bnd)
+
+	var ctrlStop int32
+	var ctrlWg sync.WaitGroup
+	ctrlWg.Add(1)
+	go func() {
+		defer ctrlWg.Done()
+		watchBindControl(client,
+			func() bool { return atomic.LoadInt32(&ctrlStop) != 0 },
+			func() { listener.Close() })
+	}()
+
+	inbound, err := listener.Accept()
+	atomic.StoreInt32(&ctrlStop, 1)
+	client.SetReadDeadline(time.Now())
+	ctrlWg.Wait()
+	client.SetReadDeadline(time.Time{})
+
+	if err != nil {
+		logPrintln(1, "Socks(BIND):", client.RemoteAddr(), err)
+		listener.Close()
+		releaseBindListener(network, bindAddr)
+		return
+	}
+
+	listener.Close()
+	releaseBindListener(network, bindAddr)
+	defer inbound.Close()
+
+	peer, ok := inbound.RemoteAddr().(*net.TCPAddr)
+	if !ok {
+		client.Write(socks5AddrReply(socks5RepGeneralFailure, la))
+		return
+	}
+	if _, err = client.Write(socks5AddrReply(socks5RepSucceeded, peer)); err != nil {
+		return
+	}
+	logPrintln(1, "Socks(BIND):", client.RemoteAddr(), "<-", peer)
+
+	relay(client, inbound)
+}
+
+func socks5BindRequest(bindIP net.IP, bindPort int) []byte {
+	if bindIP != nil && !isUnspecifiedIP(bindIP) && bindIP.To4() == nil {
+		req := make([]byte, 22)
+		req[0], req[1], req[2], req[3] = 0x05, 0x02, 0x00, 0x04
+		copy(req[4:20], bindIP.To16())
+		binary.BigEndian.PutUint16(req[20:22], uint16(bindPort))
+		return req
+	}
+	req := []byte{0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
+	if bindIP != nil && !isUnspecifiedIP(bindIP) {
+		copy(req[4:8], bindIP.To4())
+	}
+	binary.BigEndian.PutUint16(req[8:10], uint16(bindPort))
+	return req
+}
+
+func socks5Negotiate(conn net.Conn, user, password string) error {
+	proxyErr := errors.New("invalid proxy")
+	var b [2]byte
+
+	if user == "" {
+		if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+			return err
+		}
+		if err := ReadFull(conn, b[:]); err != nil {
+			return err
+		}
+		if b[0] != 0x05 || b[1] != 0x00 {
+			return proxyErr
+		}
+		return nil
+	}
+
+	if _, err := conn.Write([]byte{0x05, 0x02, 0x00, 0x02}); err != nil {
+		return err
+	}
+	if err := ReadFull(conn, b[:]); err != nil {
+		return err
+	}
+	if b[0] != 0x05 {
+		return proxyErr
+	}
+	switch b[1] {
+	case 0x00:
+		return nil
+	case 0x02:
+	default:
+		return proxyErr
+	}
+
+	ulen := len(user)
+	plen := len(password)
+	req := make([]byte, 3+ulen+plen)
+	req[0] = 0x01
+	req[1] = byte(ulen)
+	copy(req[2:2+ulen], user)
+	req[2+ulen] = byte(plen)
+	copy(req[3+ulen:], password)
+	if _, err := conn.Write(req); err != nil {
+		return err
+	}
+	if err := ReadFull(conn, b[:]); err != nil {
+		return err
+	}
+	if b[0] != 0x01 || b[1] != 0x00 {
+		return proxyErr
+	}
+	return nil
+}
+
+func socks5ReadAddrReply(conn net.Conn) (byte, *net.TCPAddr, error) {
+	proxyErr := errors.New("invalid proxy")
+	var b [264]byte
+
+	if err := ReadFull(conn, b[:4]); err != nil {
+		return 0, nil, err
+	}
+	if b[0] != 0x05 {
+		return 0, nil, proxyErr
+	}
+	rep := b[1]
+
+	var addr net.TCPAddr
+	switch b[3] {
+	case 0x01:
+		if err := ReadFull(conn, b[4:10]); err != nil {
+			return rep, nil, err
+		}
+		addr.IP = net.IP(b[4:8])
+		addr.Port = int(binary.BigEndian.Uint16(b[8:10]))
+	case 0x03:
+		if err := ReadFull(conn, b[4:5]); err != nil {
+			return rep, nil, err
+		}
+		hostLen := int(b[4])
+		if err := ReadFull(conn, b[5:7+hostLen]); err != nil {
+			return rep, nil, err
+		}
+		addr.IP = net.ParseIP(string(b[5 : 5+hostLen]))
+		addr.Port = int(binary.BigEndian.Uint16(b[5+hostLen : 7+hostLen]))
+	case 0x04:
+		if err := ReadFull(conn, b[4:22]); err != nil {
+			return rep, nil, err
+		}
+		addr.IP = net.IP(b[4:20])
+		addr.Port = int(binary.BigEndian.Uint16(b[20:22]))
+	default:
+		return rep, nil, proxyErr
+	}
+	return rep, &addr, nil
+}
+
+func DialTCPBind(cfg *SocksListenConfig) (net.Conn, *net.TCPAddr, error) {
+	if cfg == nil {
+		return nil, nil, errors.New("missing socks listen config")
+	}
+	switch {
+	case cfg.ProxyHost == "":
+		return nil, nil, errors.New("missing proxy host")
+	case cfg.ProxyPort <= 0:
+		return nil, nil, errors.New("invalid proxy port")
+	}
+
+	proxyAddr := net.JoinHostPort(cfg.ProxyHost, strconv.Itoa(cfg.ProxyPort))
+	conn, err := net.Dial("tcp", proxyAddr)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if err = socks5Negotiate(conn, cfg.User, cfg.Password); err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+
+	if _, err = conn.Write(socks5BindRequest(cfg.BindIP, cfg.BindPort)); err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+
+	rep, bnd, err := socks5ReadAddrReply(conn)
+	if err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+	if rep != socks5RepSucceeded {
+		conn.Close()
+		return nil, nil, errors.New("socks bind failed")
+	}
+
+	if bnd.IP == nil || bnd.IP.IsUnspecified() {
+		if ra, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
+			bnd.IP = ra.IP
+		}
+	}
+
+	return conn, bnd, nil
+}
+
+func SocksBindWaitInbound(conn net.Conn) (*net.TCPAddr, error) {
+	rep, peer, err := socks5ReadAddrReply(conn)
+	if err != nil {
+		return nil, err
+	}
+	if rep != socks5RepSucceeded {
+		return nil, errors.New("socks bind inbound failed")
+	}
+	return peer, nil
 }
 
 func SocksProxy(client net.Conn) {
@@ -92,7 +607,7 @@ func SocksProxy(client net.Conn) {
 				client.Write([]byte{5, 9, 0, 1, 0, 0, 0, 0, 0, 0})
 				return
 			}
-			reply = socks5Reply(cmd, client)
+			reply = socks5HandshakeReply(cmd, client)
 		} else if b[0] == 0x04 {
 			if n > 8 && b[1] == 1 {
 				userEnd := 8 + bytes.IndexByte(b[8:n], 0)
@@ -119,7 +634,7 @@ func SocksProxy(client net.Conn) {
 			return
 		}
 
-		if err == nil {
+		if err == nil && reply != nil {
 			_, err = client.Write(reply)
 		}
 
@@ -134,6 +649,7 @@ func SocksProxy(client net.Conn) {
 		tcpAddr := net.TCPAddr{IP: addr, Port: port}
 		tcp_redirect(client, &tcpAddr, host, nil)
 	case 2: // BIND
+		socks5Bind(client, host, addr, port)
 	case 3: // UDP ASSOCIATE
 		// the association lives as long as this connection is held open
 		io.Copy(io.Discard, client)

@@ -1,16 +1,109 @@
 package phantomtcp
 
 import (
+	"errors"
 	"io"
 	"log"
 	"math/rand"
 	"net"
+	"net/url"
 	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+type SocksListenConfig struct {
+	ProxyHost string
+	ProxyPort int
+	User      string
+	Password  string
+	BindIP    net.IP
+	BindPort  int
+}
+
+func IsSocksListen(listen string) bool {
+	u, err := url.Parse(listen)
+	if err != nil {
+		return false
+	}
+	switch u.Scheme {
+	case "socks5", "socks":
+		return u.Host != ""
+	default:
+		return false
+	}
+}
+
+func parseBindAddr(bind string) (net.IP, int, error) {
+	if bind == "" {
+		return net.IPv4zero, 0, nil
+	}
+	if strings.HasPrefix(bind, ":") {
+		port, err := strconv.Atoi(bind[1:])
+		if err != nil {
+			return nil, 0, err
+		}
+		return net.IPv4zero, port, nil
+	}
+	if !strings.Contains(bind, ":") {
+		port, err := strconv.Atoi(bind)
+		if err != nil {
+			return nil, 0, err
+		}
+		return net.IPv4zero, port, nil
+	}
+	host, portStr, err := net.SplitHostPort(bind)
+	if err != nil {
+		return nil, 0, err
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, 0, err
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return nil, 0, errors.New("invalid bind address")
+	}
+	return ip, port, nil
+}
+
+func ParseSocksListen(listen string) (*SocksListenConfig, error) {
+	u, err := url.Parse(listen)
+	if err != nil {
+		return nil, err
+	}
+	switch u.Scheme {
+	case "socks5", "socks":
+	default:
+		return nil, errors.New("not a socks listen URL")
+	}
+	if u.Host == "" {
+		return nil, errors.New("missing proxy host")
+	}
+	host, portStr, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		return nil, err
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, err
+	}
+	cfg := &SocksListenConfig{
+		ProxyHost: host,
+		ProxyPort: port,
+	}
+	if u.User != nil {
+		cfg.User = u.User.Username()
+		cfg.Password, _ = u.User.Password()
+	}
+	cfg.BindIP, cfg.BindPort, err = parseBindAddr(u.Query().Get("bind"))
+	if err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
 
 func IsIPv6(addr string) bool {
 	return addr[0] == '['
@@ -260,48 +353,87 @@ func UDPMapping(Address string, Target string) error {
 	}
 }
 
-func TCPMapping(Listener net.Listener, Address string, Script string) error {
-	defer Listener.Close()
+func tcpMappingRelay(incoming net.Conn, address string, script string) {
+	defer incoming.Close()
 
+	if script != "" {
+		args := strings.Fields(script)
+		cmd := exec.Command(args[0])
+		cmd.Args = args
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			logPrintln(0, err, cmd, string(out))
+			return
+		}
+	}
+
+	remote, err := net.Dial("tcp", address)
+	if err != nil {
+		logPrintln(1, err)
+		return
+	}
+	defer remote.Close()
+
+	go io.Copy(remote, incoming)
+	_, err = io.Copy(incoming, remote)
+	if err != nil {
+		return
+	}
+}
+
+func TCPMapping(Listen string, Address string, Script string) error {
 	addresses := parseAddresses(Address)
 	if len(addresses) == 0 {
 		return nil
 	}
 
+	if IsSocksListen(Listen) {
+		cfg, err := ParseSocksListen(Listen)
+		if err != nil {
+			return err
+		}
+
+		for {
+			ctrl, bnd, err := DialTCPBind(cfg)
+			if err != nil {
+				return err
+			}
+
+			logPrintln(1, "[TCP-BIND]", bnd, "waiting")
+
+			peer, err := SocksBindWaitInbound(ctrl)
+			if err != nil {
+				ctrl.Close()
+				return err
+			}
+
+			address := addresses[rand.Intn(len(addresses))]
+			logPrintln(3, "[TCP-BIND]", peer, "->", address)
+			go tcpMappingRelay(ctrl, address, Script)
+		}
+	}
+
+	var listener net.Listener
+	var err error
+	if Listen[0] == '[' {
+		listener, err = net.Listen("tcp6", Listen)
+	} else {
+		listener, err = net.Listen("tcp", Listen)
+	}
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+
 	for {
-		client, err := Listener.Accept()
+		client, err := listener.Accept()
 		if err != nil {
 			log.Println(err)
 			return err
 		}
 
 		address := addresses[rand.Intn(len(addresses))]
-
 		logPrintln(3, "[TCP]", client.RemoteAddr().String(), address)
-
-		go func(client net.Conn, address string) {
-			if Script != "" {
-				args := strings.Fields(Script)
-				cmd := exec.Command(args[0])
-				cmd.Args = args
-				out, err := cmd.CombinedOutput()
-				if err != nil {
-					logPrintln(0, err, cmd, string(out))
-					return
-				}
-			}
-
-			remote, err := net.Dial("tcp", address)
-			if err != nil {
-				logPrintln(1, err)
-				return
-			}
-
-			go io.Copy(client, remote)
-			_, err = io.Copy(remote, client)
-			if err != nil {
-				return
-			}
-		}(client, address)
+		go tcpMappingRelay(client, address, Script)
 	}
 }
