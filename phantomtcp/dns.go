@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -293,7 +292,7 @@ func HTTPSlookup(request []byte, u *url.URL, servername string) ([]byte, error) 
 		Timeout: time.Duration(5 * time.Second),
 	}
 	client.Transport = &http.Transport{
-		TLSClientConfig: tlsConfig,
+		TLSClientConfig:   tlsConfig,
 		ForceAttemptHTTP2: true,
 	}
 
@@ -1005,8 +1004,8 @@ func PackRequest(name string, qtype uint16, id uint16, ecs string, qtype2 uint16
 	} else {
 		binary.BigEndian.PutUint16(Request[4:], 1) //QDCount
 	}
-	binary.BigEndian.PutUint16(Request[6:], 0)      //ANCount
-	binary.BigEndian.PutUint16(Request[8:], 0)      //NSCount
+	binary.BigEndian.PutUint16(Request[6:], 0) //ANCount
+	binary.BigEndian.PutUint16(Request[8:], 0) //NSCount
 	if ecs != "" {
 		binary.BigEndian.PutUint16(Request[10:], 1) //ARCount
 	} else {
@@ -1125,32 +1124,194 @@ func GetDNSLie(index int) (string, *Outbound) {
 	return lie.Name, lie.Interface
 }
 
+// dnsPlan is the address-family query decision for an outbound when the
+// caller does not mandate a qtype.
+type dnsPlan struct {
+	// conflict marks a single-family DNS type option contradicted by an
+	// explicit hint of the opposite family: no usable family remains and
+	// NSLookup refuses to resolve.
+	conflict bool
+	// qtype is the query family of a single-family plan: 1 (A) or 28
+	// (AAAA). 0 means both families are queried.
+	qtype int
+	// v4first is the preferred family of a dual-family plan: true
+	// queries A first, false queries AAAA first.
+	v4first bool
+}
+
+// planDNSQuery is the single source of truth for which address families an
+// outbound queries, and in which order, when the caller does not mandate a
+// qtype (NSLookup with qtype==0): NAT64 forces A, then the DNS "type"
+// option, then an explicit hint, then the device probe / dual-family
+// fallback recorded in Hint at startup. CreateOutbounds previews the
+// plan into the QueryOrder field (describeDNSQuery) so the outbound
+// dump printed at profile load shows the effective query order
+// before the program serves any request.
+func (outbound *Outbound) planDNSQuery() dnsPlan {
+	var typeOption string
+	if u, err := url.Parse(outbound.DNS); err == nil && u.RawQuery != "" {
+		typeOption = ParseOptions(u.RawQuery).Type
+	}
+
+	hint := outbound.Hint
+	ipv4 := hint&HINT_IPV4 != 0
+	ipv6 := hint&HINT_IPV6 != 0
+	v4first := hint&HINT_V4FIRST != 0
+
+	if outbound.Protocol == NAT64 {
+		// NAT64 always queries A and synthesizes AAAA from the
+		// answers; type/hint/device must not interfere.
+		return dnsPlan{qtype: 1}
+	} else if typeOption == "A" || typeOption == "AAAA" {
+		// A single-family type option sets the query scope and the
+		// connection follows it. An explicit hint of the opposite
+		// single family is a conflict: no usable family remains; a
+		// hint of the same family or a dual-family hint is not.
+		if outbound.HasIPHint && ipv4 != ipv6 {
+			if typeOption == "A" && ipv6 || typeOption == "AAAA" && ipv4 {
+				return dnsPlan{conflict: true}
+			}
+		}
+		if typeOption == "A" {
+			return dnsPlan{qtype: 1}
+		}
+		return dnsPlan{qtype: 28}
+	} else if (typeOption == "A,AAAA" || typeOption == "AAAA,A") && outbound.HasIPHint && ipv4 != ipv6 {
+		// Dual-family type narrowed by an explicit single-family
+		// hint: query that family only (exclusive, no fallback).
+		if ipv4 {
+			return dnsPlan{qtype: 1}
+		}
+		return dnsPlan{qtype: 28}
+	} else if typeOption == "A,AAAA" || typeOption == "AAAA,A" {
+		// Dual-family type without a narrowing hint: dual-stack with
+		// fallback. An explicit dual-family hint keeps its own order;
+		// otherwise the type order decides.
+		if !outbound.HasIPHint {
+			v4first = typeOption == "A,AAAA"
+		}
+		return dnsPlan{v4first: v4first}
+	} else if ipv4 == ipv6 {
+		// No type option: hint, device probe or the no-hint
+		// dual-family fallback recorded in Hint.
+		return dnsPlan{v4first: v4first}
+	} else if ipv6 {
+		return dnsPlan{qtype: 28}
+	}
+	return dnsPlan{qtype: 1}
+}
+
+// describeDNSQuery renders the startup preview of an outbound's DNS
+// decision: the query family order, one of "A", "AAAA", "A,AAAA",
+// "AAAA,A", or "none" when no query can be made (no DNS server,
+// invalid URL, unsupported scheme, or a type-vs-hint conflict).
+// CreateOutbounds stores it in the QueryOrder field so the &{...}
+// outbound dump printed at profile load shows the plan next to the
+// DNS URL.
+func (outbound *Outbound) describeDNSQuery() string {
+	if outbound.DNS == "" {
+		return "none"
+	}
+	u, err := url.Parse(outbound.DNS)
+	if err != nil || u.Host == "" {
+		return "none"
+	}
+	switch u.Scheme {
+	case "udp", "tcp", "tls", "https", "tfo":
+	default:
+		return "none"
+	}
+
+	plan := outbound.planDNSQuery()
+	if plan.conflict {
+		return "none"
+	}
+	switch {
+	case plan.qtype == 1:
+		return "A"
+	case plan.qtype == 28:
+		return "AAAA"
+	case plan.v4first:
+		return "A,AAAA"
+	}
+	return "AAAA,A"
+}
+
 func (outbound *Outbound) NSLookup(name string, qtype uint16) (uint32, []net.IP) {
 	hint := outbound.Hint
 
 	if qtype == 0 {
-		ipv4 := hint&HINT_IPV4 != 0
-		ipv6 := hint&HINT_IPV6 != 0
-		if (outbound.Protocol == NAT64) {
-			qtype = 1
-		} else if ipv4 == ipv6 {
+		// Honor the DNS "type=A/AAAA" option on the outbound resolution
+		// path as well. It was previously respected only by NSRequest (the
+		// DNS server path), so outbounds still issued AAAA queries under
+		// type=A and could adopt poisoned answers injected into DNS
+		// responses (e.g. 2a03:2880:...:face:b00c...).
+		// The option also accepts both families as "type=A,AAAA" or
+		// "type=AAAA,A". The type option defines the query scope;
+		// the connection strategy still follows an explicit hint
+		// (hint order wins over type order, and a single-family
+		// hint narrows a dual-family type); only when no hint is
+		// given does the type order decide the preference.
+		// The family decision lives in planDNSQuery so the startup
+		// preview (describeDNSQuery) always matches the runtime.
+		var typeOption string
+		if u, err := url.Parse(outbound.DNS); err == nil && u.RawQuery != "" {
+			typeOption = ParseOptions(u.RawQuery).Type
+		}
+
+		plan := outbound.planDNSQuery()
+		if plan.conflict {
+			// An explicit hint of the opposite single family is a
+			// conflict: log a warning and refuse to connect.
+			if typeOption == "A" {
+				logPrintln(1, "Conflict: DNS type=A vs hint ipv6, no usable family for", name)
+			} else {
+				logPrintln(1, "Conflict: DNS type=AAAA vs hint ipv4, no usable family for", name)
+			}
+			return 0, nil
+		}
+		if (typeOption == "A" || typeOption == "AAAA") && outbound.HasIPHint &&
+			hint&HINT_IPV4 != 0 && hint&HINT_IPV6 != 0 {
+			// A dual-family hint only logs that the other family
+			// goes unused.
+			queryFamily, ignoredFamily, dnsType := "ipv4", "ipv6", "A"
+			if typeOption == "AAAA" {
+				queryFamily, ignoredFamily, dnsType = "ipv6", "ipv4", "AAAA"
+			}
+			// Show the hinted families in the order the profile lists
+			// them: CreateOutbounds sets HINT_V4FIRST when the hint string
+			// named ipv4 before ipv6, so this is the configured order.
+			hintFamilies := "ipv6,ipv4"
+			if hint&HINT_V4FIRST != 0 {
+				hintFamilies = "ipv4,ipv6"
+			}
+			// DNS: ipv4-only. query=A, hint=ipv6,ipv4 -> ignoring ipv6 for www.test
+			logPrintln(1, "DNS: "+queryFamily+"-only. query="+dnsType+", hint="+hintFamilies+" -> ignoring "+ignoredFamily+" for "+name)
+		}
+
+		if plan.qtype == 0 {
 			ch := make(chan []net.IP, 1)
 			var index uint32
+			first, second := 28, 1 // preferred family queried first (IPv6 by default)
+			if plan.v4first {
+				first, second = 1, 28
+			}
 			go func() {
-				_, addresses := outbound.NSLookup(name, 1)
+				_, addresses := outbound.NSLookup(name, uint16(second))
 				ch <- addresses
 			}()
 
-			index, addresses := outbound.NSLookup(name, 28)
-			if len(addresses) != 0 {
-				return index, addresses
+			index, pref_addrs := outbound.NSLookup(name, uint16(first))
+			rest_addrs := <-ch
+			var addresses []net.IP
+			if len(pref_addrs) != 0 || len(rest_addrs) != 0 {
+				addresses = make([]net.IP, 0, len(pref_addrs)+len(rest_addrs))
+				addresses = append(addresses, pref_addrs...)
+				addresses = append(addresses, rest_addrs...)
 			}
-			return index, <-ch
-		} else if ipv6 {
-			qtype = 28
-		} else {
-			qtype = 1
+			return index, addresses
 		}
+		qtype = uint16(plan.qtype)
 	}
 
 	records := LoadDNSCache(name)
@@ -1446,37 +1607,37 @@ func NSRequest(request []byte, cache bool) (uint32, []byte) {
 	default:
 		return 0, response
 	}
-/*
-	if UseVaddr && (records.Index == 0) {
-		records.Index = AddDNSLie(name, outbound)
+	/*
+		if UseVaddr && (records.Index == 0) {
+			records.Index = AddDNSLie(name, outbound)
 
-		if options.Output != "" {
-			f, err := os.OpenFile(options.Output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-			if err != nil {
-				logPrintln(1, options.Output, err)
-			}
-			defer f.Close()
-
-			if _qtype == 1 {
-				if records.IPv4Hint.Addresses != nil {
-					f.WriteString(name + "=")
-					for _, ip := range records.IPv4Hint.Addresses {
-						f.WriteString(ip.String())
-					}
-					f.WriteString("\n")
+			if options.Output != "" {
+				f, err := os.OpenFile(options.Output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+				if err != nil {
+					logPrintln(1, options.Output, err)
 				}
-			} else if _qtype == 28 {
-				if records.IPv6Hint.Addresses != nil {
-					f.WriteString(name + "=")
-					for _, ip := range records.IPv6Hint.Addresses {
-						f.WriteString(ip.String())
+				defer f.Close()
+
+				if _qtype == 1 {
+					if records.IPv4Hint.Addresses != nil {
+						f.WriteString(name + "=")
+						for _, ip := range records.IPv4Hint.Addresses {
+							f.WriteString(ip.String())
+						}
+						f.WriteString("\n")
 					}
-					f.WriteString("\n")
+				} else if _qtype == 28 {
+					if records.IPv6Hint.Addresses != nil {
+						f.WriteString(name + "=")
+						for _, ip := range records.IPv6Hint.Addresses {
+							f.WriteString(ip.String())
+						}
+						f.WriteString("\n")
+					}
 				}
 			}
 		}
-	}
-*/
+	*/
 
 	return records.Index, records.BuildResponse(request, qtype, 0)
 }
@@ -1492,7 +1653,7 @@ func (outbound *Outbound) ResolveTCPAddr(host string, port int) (*net.TCPAddr, e
 		return nil, errors.New("no such host")
 	}
 
-	return &net.TCPAddr{IP: addrs[rand.Intn(len(addrs))], Port: port}, nil
+	return &net.TCPAddr{IP: addrs[preferredIPIndex(addrs)], Port: port}, nil
 }
 
 func (outbound *Outbound) ResolveTCPAddrs(host string, port int) ([]*net.TCPAddr, error) {

@@ -58,10 +58,10 @@ func (outbound *Outbound) dial(host string, port int, header []byte, offset int,
 
 	var raddr *net.TCPAddr = nil
 	var laddr *net.TCPAddr = nil
-	raddr_index := mathrand.Intn(len(raddrs))
+	addr_order := preferredOrder(raddrs)
 	raddrs_len := len(raddrs)
 	for i := 0; i < raddrs_len; i++ {
-		raddr = raddrs[(i + raddr_index) % raddrs_len]
+		raddr = raddrs[addr_order[i]]
 		if device != "" {
 			if laddr, err = GetLocalTCPAddr(device, raddr.IP.To4() == nil); err != nil {
 				return nil, nil, err

@@ -3,7 +3,6 @@ package phantomtcp
 import (
 	"encoding/binary"
 	"errors"
-	"math/rand"
 	"net"
 	"sync"
 	"time"
@@ -159,7 +158,7 @@ func (outbound *Outbound) dialUDPProxy(host string, port int, deadline time.Time
 	if err != nil {
 		return nil, err
 	}
-	raddr := raddrs[rand.Intn(len(raddrs))]
+	raddr := raddrs[preferredTCPIndex(raddrs)]
 
 	proxy_err := errors.New("invalid proxy")
 	var tcpConn net.Conn = nil
@@ -176,7 +175,9 @@ func (outbound *Outbound) dialUDPProxy(host string, port int, deadline time.Time
 			if err != nil {
 				return nil, err
 			}
-			laddr = &net.UDPAddr{IP: _laddr.IP, Port: 0}
+			if _laddr != nil {
+				laddr = &net.UDPAddr{IP: _laddr.IP, Port: 0}
+			}
 		}
 		return net.DialUDP("udp", laddr, &net.UDPAddr{IP: raddr.IP, Port: raddr.Port})
 	case SOCKS5:

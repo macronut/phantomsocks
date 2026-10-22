@@ -46,7 +46,9 @@ func IsNormalError(err error) bool {
 
 		if errErrno == syscall.ETIMEDOUT ||
 			errErrno == syscall.ECONNREFUSED ||
-			errErrno == syscall.ECONNRESET {
+			errErrno == syscall.ECONNRESET ||
+			errErrno == syscall.ENETUNREACH ||
+			errErrno == syscall.EHOSTUNREACH {
 			return true
 		}
 	default:
@@ -55,6 +57,62 @@ func IsNormalError(err error) bool {
 	}
 
 	return false
+}
+
+// preferredTCPIndex returns an index for single-address picks: the pick
+// is confined to the leading same-family block of the list, which is the
+// preferred family as ordered by NSLookup. Pure lists keep the original
+// random behavior.
+func preferredTCPIndex(raddrs []*net.TCPAddr) int {
+	n := len(raddrs)
+	block := 1
+	is4 := raddrs[0].IP.To4() != nil
+	for block < n && (raddrs[block].IP.To4() != nil) == is4 {
+		block++
+	}
+	return mathrand.Intn(block)
+}
+
+// preferredIPIndex is the []net.IP flavor of preferredTCPIndex.
+func preferredIPIndex(addrs []net.IP) int {
+	n := len(addrs)
+	block := 1
+	is4 := addrs[0].To4() != nil
+	for block < n && (addrs[block].To4() != nil) == is4 {
+		block++
+	}
+	return mathrand.Intn(block)
+}
+
+// preferredOrder returns the dial attempt order: it rotates through the
+// leading same-family block first (the preferred family as ordered by
+// NSLookup), then through the remaining block, with random start offsets
+// to keep multi-record load balancing.
+func preferredOrder(raddrs []*net.TCPAddr) []int {
+	n := len(raddrs)
+	is4 := raddrs[0].IP.To4() != nil
+	lead := 1
+	for lead < n && (raddrs[lead].IP.To4() != nil) == is4 {
+		lead++
+	}
+	order := make([]int, n)
+	if lead == n {
+		start := mathrand.Intn(n)
+		for i := 0; i < n; i++ {
+			order[i] = (start + i) % n
+		}
+		return order
+	}
+	startL := mathrand.Intn(lead)
+	for i := 0; i < lead; i++ {
+		order[i] = (startL + i) % lead
+	}
+	rest := n - lead
+	startR := mathrand.Intn(rest)
+	for i := 0; i < rest; i++ {
+		order[lead+i] = lead + (startR+i)%rest
+	}
+	return order
 }
 
 func GetLocalTCPAddr(name string, ipv6 bool) (*net.TCPAddr, error) {

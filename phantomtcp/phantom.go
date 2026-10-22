@@ -57,10 +57,16 @@ const (
 type Outbound struct {
 	Device string
 	DNS    string
-	Hint   uint32
-	MTU    uint16
-	TTL    byte
-	MaxTTL byte
+	// QueryOrder previews the DNS query families and their order,
+	// one of "A", "AAAA", "A,AAAA", "AAAA,A", or "none" when no
+	// query can be made. CreateOutbounds fills it in once the hint
+	// is final so the &{...} dump printed at profile load shows the
+	// plan right after the DNS URL.
+	QueryOrder string
+	Hint       uint32
+	MTU        uint16
+	TTL        byte
+	MaxTTL     byte
 
 	Protocol      byte
 	Address       string
@@ -68,6 +74,12 @@ type Outbound struct {
 
 	Timeout  uint16
 	Fallback *Outbound
+
+	// HasIPHint records whether the config explicitly listed
+	// ipv4/ipv6 in the hint string, as opposed to bits set later
+	// by device probing or the no-hint fallback. Used by NSLookup
+	// so an explicit hint overrides the DNS type option preference.
+	HasIPHint bool
 }
 
 type IPv4Range struct {
@@ -132,6 +144,7 @@ const (
 	HINT_RAND      = 0x1 << 25
 	HINT_TCPFRAG   = 0x1 << 26
 	HINT_TLSFRAG   = 0x1 << 27
+	HINT_V4FIRST   = 0x1 << 28
 	HINT_KEEPALIVE = 0x1 << 29
 	HINT_SYNX2     = 0x1 << 30
 	HINT_ZERO      = 0x1 << 31
@@ -820,21 +833,31 @@ func CreateOutbounds(Outbounds []OutboundConfig) []string {
 	var devices []string
 	for _, config := range Outbounds {
 		var Hint uint32 = HINT_NONE
-		for _, h := range strings.Split(config.Hint, ",") {
+		pos4, pos6 := -1, -1
+		for i, h := range strings.Split(config.Hint, ",") {
 			if h != "" {
 				hint, ok := HintMap[h]
 				if ok {
 					Hint |= hint
+					if hint == HINT_IPV4 && pos4 < 0 {
+						pos4 = i
+					} else if hint == HINT_IPV6 && pos6 < 0 {
+						pos6 = i
+					}
 				} else {
 					logPrintln(1, "unsupported hint: "+h)
 				}
 			}
+		}
+		if pos4 >= 0 && pos6 > pos4 {
+			Hint |= HINT_V4FIRST
 		}
 
 		outbound := new(Outbound)
 		outbound.Device = config.Device
 		outbound.DNS = config.DNS
 		outbound.Hint = Hint
+		outbound.HasIPHint = pos4 >= 0 || pos6 >= 0
 		outbound.MTU = uint16(config.MTU)
 		outbound.TTL = byte(config.TTL)
 		outbound.MaxTTL = byte(config.MaxTTL)
@@ -900,10 +923,11 @@ func CreateOutbounds(Outbounds []OutboundConfig) []string {
 			}
 		}
 
-		if Hint&HINT_IPV4 == 0 && Hint&HINT_IPV6 == 0 {
-			outbound.Hint |= HINT_IPV4
+		if outbound.Hint&HINT_IPV4 == 0 && outbound.Hint&HINT_IPV6 == 0 {
+			outbound.Hint |= HINT_IPV4 | HINT_IPV6 | HINT_V4FIRST
 		}
 
+		outbound.QueryOrder = outbound.describeDNSQuery()
 	}
 
 	default_outbound, ok := OutboundsMap["default"]
