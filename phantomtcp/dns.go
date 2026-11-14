@@ -423,14 +423,14 @@ func GetName(buf []byte, offset int) (string, int) {
 		if name != "" {
 			name += "."
 		}
-		if length < 63 {
+		if (length & 0xC0) != 0xC0 {
 			name += string(buf[offset : offset+length])
 			offset += int(length)
 			if offset+2 > len(buf) {
 				return "", offset
 			}
 		} else {
-			_offset := int(buf[offset])
+			_offset := int(binary.BigEndian.Uint16(buf[offset-1:offset+1]) & 0x3FFF)
 			_name, _ := GetName(buf, _offset)
 			name += _name
 			return name, offset + 1
